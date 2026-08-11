@@ -3839,11 +3839,14 @@ elif page == "📄 Rapport de pilotage":
                  - (df_rem_["Débit"].sum() - df_rem_["Crédit"].sum()))
     charges_tot_ = (df_c_["Débit"].sum() - df_c_["Crédit"].sum()) - net_prov_
     mn_total  = ca_total - charges_tot_
-    # Charges indirectes pour information
-    valeurs_ci = ["CHARGES INDIRECTES", "FRAIS GENERAUX", "CHARGES INDIRECTES REPARTIES"]
-    valeurs_ci += [x.upper() for x in params.get("libelles_indirects", [])]
-    mask_ci    = df["Code_Analytique"].astype(str).str.upper().isin(valeurs_ci)
-    ci_total   = df[mask_ci]["Débit"].sum() - df[mask_ci]["Crédit"].sum()
+    # Charges indirectes : chercher dans Code_Analytique (non réparties)
+    # ET dans Compte (réparties via le module paramétrage)
+    valeurs_ci_code = ["CHARGES INDIRECTES", "FRAIS GENERAUX"]
+    valeurs_ci_code += [x.upper() for x in params.get("libelles_indirects", [])]
+    mask_ci_code = df["Code_Analytique"].astype(str).str.upper().isin(valeurs_ci_code)
+    mask_ci_cpt  = df["Compte"].astype(str) == COMPTE_CHARGES_INDIRECTES_REPARTIES
+    ci_total     = df[mask_ci_code | mask_ci_cpt]["Débit"].sum() - df[mask_ci_code | mask_ci_cpt]["Crédit"].sum()
+    # Fallback Famille_Analytique si toujours 0
     if ci_total == 0 and "Famille_Analytique" in df.columns:
         mask_ci2 = df["Famille_Analytique"].astype(str).str.upper().str.contains("INDIRECT|STRUCTURE|GENERAUX", na=False)
         ci_total = df[mask_ci2]["Débit"].sum() - df[mask_ci2]["Crédit"].sum()
