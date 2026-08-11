@@ -3788,542 +3788,299 @@ Sois précis, factuel et orienté action."""
 # Et dans le bloc elif :
 elif page == "📄 Rapport de pilotage":
     st.header("📄 Rapport de pilotage analytique")
-    st.markdown("*Génération automatique du rapport de restitution au dirigeant — Format Word professionnel*")
+    st.markdown("*Génération automatique du rapport de restitution au dirigeant - Format Word professionnel*")
 
-    # Vérifier que les données sont chargées
     if "df_pivot" not in st.session_state:
         st.warning("⚠️ Aucune donnée chargée. Veuillez d'abord importer votre Grand Livre analytique dans la page **📂 Import des données**.")
         st.stop()
 
-    df = st.session_state["df_pivot"].copy()
+    import datetime as _dt
+    df     = st.session_state["df_pivot"].copy()
     params = st.session_state.get("param_comptes", {})
 
-    # ── PARAMÈTRES DU RAPPORT ────────────────────────────────────────────────
     st.subheader("⚙️ Paramètres du rapport")
-
     col1, col2 = st.columns(2)
     with col1:
         nom_editeur   = st.text_input("Nom de la maison d'édition", value="Éditions de l'Argonaute")
         nom_cabinet   = st.text_input("Nom du cabinet", value="CAB ÉDITION")
         exercice      = st.text_input("Exercice", value="2025/2026")
     with col2:
-        date_rapport  = st.date_input("Date du rapport", value=__import__('datetime').date.today())
+        date_rapport  = st.date_input("Date du rapport", value=_dt.date.today())
         ref_mission   = st.text_input("Référence lettre de mission", value="LM-2025-001")
         periode_debut = st.text_input("Début de période", value="01/04/2025")
         periode_fin   = st.text_input("Fin de période", value="31/03/2026")
 
-    mode_anon = st.checkbox(
-        "🕶️ Anonymiser les titres dans le rapport",
-        value=st.session_state.get("mode_anonyme", True),
-        help="Remplace les EAN et titres réels par des identifiants fictifs"
-    )
-
-    nb_top = st.slider("Nombre de titres dans le Top / Flop", min_value=3, max_value=10, value=5)
-
+    mode_anon = st.checkbox("🕶️ Anonymiser les titres", value=st.session_state.get("mode_anonyme", True))
+    nb_top    = st.slider("Nombre de titres Top / Flop", 3, 10, 5)
     st.divider()
 
-    # ── CALCUL DES INDICATEURS ───────────────────────────────────────────────
-    # Récupérer les titres actifs (EAN réels)
-    from io import BytesIO
-    import pandas as pd
-    import numpy as np
-    import datetime
-
-    # Importer les fonctions depuis l'app principale
     titres_actifs = st.session_state.get("titres_actifs", [])
     if not titres_actifs:
-        # Recalculer si nécessaire
-        col_ean = "Code_Analytique"
-        titres_actifs = df[
-            df[col_ean].astype(str).str.match(r"^97[89]\d{10}")
-        ][col_ean].unique().tolist()
-
+        titres_actifs = df[df["Code_Analytique"].astype(str).str.match(r"^97[89]\d{10}")]["Code_Analytique"].unique().tolist()
     if not titres_actifs:
-        st.error("❌ Aucun EAN valide trouvé dans les données. Vérifiez le paramétrage analytique.")
+        st.error("❌ Aucun EAN valide trouvé. Vérifiez le paramétrage analytique.")
         st.stop()
 
-    # Appeler la fonction de calcul existante
     res = calculer_indicateurs_titres(df, params, titres_actifs)
-
-    # Ajouter les labels de titres
     mapping = obtenir_mapping_anonymisation(df)
-    res["Titre"] = res["Code_Analytique"].apply(
-        lambda c: mapping.get(c, c) if mode_anon else label_affiche(c, df)
-    )
-    res["EAN_display"] = res["Code_Analytique"].apply(
-        lambda c: f"EAN-{str(titres_actifs.index(c)+1).zfill(3)}" if mode_anon and c in titres_actifs else c
-    )
+    res["Titre"] = res["Code_Analytique"].apply(lambda c: mapping.get(c, c) if mode_anon else label_affiche(c, df))
 
-    # Calculer les charges indirectes totales
-    mask_ci = df["Code_Analytique"].astype(str).str.upper().isin(
-        [x.upper() for x in params.get("libelles_indirects", ["CHARGES INDIRECTES", "FRAIS GENERAUX"])]
-    )
-    ci_total = df[mask_ci]["Débit"].sum() - df[mask_ci]["Crédit"].sum()
-    nb_eans  = len(titres_actifs)
+    # Charges indirectes : chercher dans Code_Analytique ET dans les libelles_indirects paramétrés
+    libelles_ci = params.get("libelles_indirects", [])
+    valeurs_ci  = ["CHARGES INDIRECTES", "FRAIS GENERAUX", "CHARGES INDIRECTES REPARTIES"] + [x.upper() for x in libelles_ci]
+    mask_ci     = df["Code_Analytique"].astype(str).str.upper().isin(valeurs_ci)
+    ci_total    = df[mask_ci]["Débit"].sum() - df[mask_ci]["Crédit"].sum()
+    # Fallback : si pas trouvé, calculer depuis la colonne Famille_Analytique si elle existe
+    if ci_total == 0 and "Famille_Analytique" in df.columns:
+        mask_ci2 = df["Famille_Analytique"].astype(str).str.upper().str.contains("INDIRECT|STRUCTURE|GENERAUX", na=False)
+        ci_total = df[mask_ci2]["Débit"].sum() - df[mask_ci2]["Crédit"].sum()
+    nb_eans    = len(titres_actifs)
     ci_par_ean = ci_total / nb_eans if nb_eans > 0 else 0
-
-    # Totaux
-    ca_total  = res["CA net"].sum()
-    mb_total  = res["Marge brute"].sum()
-    mn_total  = res["Résultat net"].sum()
-    taux_mb   = (mb_total / ca_total * 100) if ca_total > 0 else 0
-    n_positifs = (res["Marge brute"] > 0).sum()
-    n_negatifs = (res["Marge brute"] <= 0).sum()
-
-    # Classement
+    ca_total   = res["CA net"].sum()
+    mb_total   = res["Marge brute"].sum()
+    mn_total   = res["Résultat net"].sum()
+    taux_mb    = (mb_total / ca_total * 100) if ca_total > 0 else 0
+    n_pos      = (res["Marge brute"] > 0).sum()
+    n_neg      = (res["Marge brute"] <= 0).sum()
     res_sorted = res.sort_values("Marge brute", ascending=False).reset_index(drop=True)
-    top_n  = res_sorted.head(nb_top)
-    flop_n = res_sorted.tail(nb_top).iloc[::-1].reset_index(drop=True)
 
-    # ── APERÇU DANS L'APP ────────────────────────────────────────────────────
-    st.subheader("📊 Aperçu des indicateurs clés")
-
+    st.subheader("📊 Aperçu")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("CA net total", f"{fmt_fr(ca_total)} €")
-    m2.metric("Marge brute", f"{fmt_fr(mb_total)} €", f"{fmt_fr(taux_mb, 1)} %")
+    m1.metric("CA net", f"{fmt_fr(ca_total)} €")
+    m2.metric("Marge brute", f"{fmt_fr(mb_total)} €", f"{fmt_fr(taux_mb,1)} %")
     m3.metric("Résultat net", f"{fmt_fr(mn_total)} €")
-    m4.metric("Titres déficitaires", f"{n_negatifs} / {nb_eans}")
+    m4.metric("Titres déficitaires", f"{n_neg} / {nb_eans}")
 
     col_t, col_f = st.columns(2)
     with col_t:
-        st.markdown(f"**🟢 Top {nb_top} titres contributifs**")
-        st.dataframe(
-            top_n[["Titre", "CA net", "Marge brute", "Signal"]].rename(columns={
-                "CA net": "CA net (€)", "Marge brute": "Marge brute (€)"
-            }).style.format({"CA net (€)": "{:,.0f}", "Marge brute (€)": "{:+,.0f}"}),
-            hide_index=True, use_container_width=True
-        )
+        st.markdown(f"**🟢 Top {nb_top}**")
+        st.dataframe(res_sorted.head(nb_top)[["Titre","CA net","Marge brute"]].style.format({"CA net":"{:,.0f}","Marge brute":"{:+,.0f}"}), hide_index=True, use_container_width=True)
     with col_f:
-        st.markdown(f"**🔴 Flop {nb_top} titres déficitaires**")
-        st.dataframe(
-            flop_n[["Titre", "CA net", "Marge brute", "Signal"]].rename(columns={
-                "CA net": "CA net (€)", "Marge brute": "Marge brute (€)"
-            }).style.format({"CA net (€)": "{:,.0f}", "Marge brute (€)": "{:+,.0f}"}),
-            hide_index=True, use_container_width=True
-        )
+        st.markdown(f"**🔴 Flop {nb_top}**")
+        st.dataframe(res_sorted.tail(nb_top).iloc[::-1][["Titre","CA net","Marge brute"]].style.format({"CA net":"{:,.0f}","Marge brute":"{:+,.0f}"}), hide_index=True, use_container_width=True)
 
     st.divider()
-
-    # ── GÉNÉRATION DU RAPPORT WORD ───────────────────────────────────────────
     st.subheader("📄 Générer le rapport Word")
 
     if st.button("🖨️ Générer le rapport de pilotage", type="primary", use_container_width=True):
-        with st.spinner("Génération du rapport en cours..."):
-
+        with st.spinner("Génération en cours..."):
             try:
-                from docx import Document
-                from docx.shared import Pt, Cm, RGBColor
-                from docx.enum.text import WD_ALIGN_PARAGRAPH
-                from docx.enum.table import WD_ALIGN_VERTICAL
-                from docx.oxml.ns import qn
-                from docx.oxml import OxmlElement
+                from docx import Document as _Doc
+                from docx.shared import Pt as _Pt, Cm as _Cm, RGBColor as _RGB
+                from docx.enum.text import WD_ALIGN_PARAGRAPH as _AP
+                from docx.enum.table import WD_ALIGN_VERTICAL as _AV
+                from docx.oxml.ns import qn as _qn
+                from docx.oxml import OxmlElement as _OE
+                from io import BytesIO as _BIO
 
-                # ── CONSTANTES COULEURS ──────────────────────────────────────
-                MARINE  = RGBColor(0x1F, 0x4E, 0x79)
-                TERRA   = RGBColor(0xC0, 0x52, 0x2A)
-                LIGHT   = RGBColor(0xF5, 0xE6, 0xDF)
-                BL_LT   = RGBColor(0xD6, 0xE4, 0xF0)
-                WHITE   = RGBColor(0xFF, 0xFF, 0xFF)
-                GREEN   = RGBColor(0xE2, 0xEF, 0xDA)
-                RED     = RGBColor(0xFF, 0xDD, 0xD9)
-                YELLOW  = RGBColor(0xFF, 0xF2, 0xCC)
-                GREY    = RGBColor(0xF2, 0xF2, 0xF2)
+                _MR = _RGB(0x1F,0x4E,0x79)
+                _TR = _RGB(0xC0,0x52,0x2A)
+                _WH = _RGB(0xFF,0xFF,0xFF)
+                _GC = "E2EFDA"; _RC = "FFDDD9"; _YC = "FFF2CC"
+                _BC = "D6E4F0"; _LC = "F5E6DF"
 
-                def hex_color(rgb):
-                    return f"{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+                def _shd(cell, h):
+                    tc = cell._tc; p = tc.get_or_add_tcPr()
+                    for o in p.findall(_qn("w:shd")): p.remove(o)
+                    s = _OE("w:shd"); s.set(_qn("w:val"),"clear"); s.set(_qn("w:color"),"auto"); s.set(_qn("w:fill"),h); p.append(s)
 
-                def set_cell_bg(cell, rgb_hex):
-                    tc = cell._tc
-                    tcPr = tc.get_or_add_tcPr()
-                    shd = OxmlElement('w:shd')
-                    shd.set(qn('w:val'), 'clear')
-                    shd.set(qn('w:color'), 'auto')
-                    shd.set(qn('w:fill'), rgb_hex)
-                    tcPr.append(shd)
+                def _brd(cell, c="CCCCCC", z="4"):
+                    tc = cell._tc; p = tc.get_or_add_tcPr()
+                    for o in p.findall(_qn("w:tcBorders")): p.remove(o)
+                    b = _OE("w:tcBorders")
+                    for e in ["top","left","bottom","right"]:
+                        x = _OE(f"w:{e}"); x.set(_qn("w:val"),"single"); x.set(_qn("w:sz"),z); x.set(_qn("w:color"),c); b.append(x)
+                    p.append(b)
 
-                def set_cell_borders(cell):
-                    tc = cell._tc
-                    tcPr = tc.get_or_add_tcPr()
-                    tcBorders = OxmlElement('w:tcBorders')
-                    for edge in ['top', 'left', 'bottom', 'right']:
-                        bd = OxmlElement(f'w:{edge}')
-                        bd.set(qn('w:val'), 'single')
-                        bd.set(qn('w:sz'), '4')
-                        bd.set(qn('w:color'), 'CCCCCC')
-                        tcBorders.append(bd)
-                    tcPr.append(tcBorders)
+                def _wc(cell, text, bold=False, italic=False, color=None, size=9, center=False, fill=None):
+                    if fill: _shd(cell, fill)
+                    _brd(cell)
+                    cell.vertical_alignment = _AV.CENTER
+                    p = cell.paragraphs[0]; p.clear()
+                    p.alignment = _AP.CENTER if center else _AP.LEFT
+                    p.paragraph_format.space_before = _Pt(2); p.paragraph_format.space_after = _Pt(2)
+                    r = p.add_run(str(text)); r.bold=bold; r.italic=italic
+                    r.font.size=_Pt(size); r.font.name="Arial"
+                    r.font.color.rgb = color if color else _RGB(0,0,0)
 
-                def add_cell(cell, text, bold=False, italic=False,
-                              color=None, size=9, center=False, bg=None):
-                    set_cell_borders(cell)
-                    if bg:
-                        set_cell_bg(cell, bg)
-                    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-                    p = cell.paragraphs[0]
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.LEFT
-                    run = p.add_run(str(text))
-                    run.bold = bold
-                    run.italic = italic
-                    run.font.size = Pt(size)
-                    run.font.name = "Arial"
-                    if color:
-                        run.font.color.rgb = color
-                    else:
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                def _hr(tbl, cols, fill="1F4E79"):
+                    row = tbl.rows[0]
+                    for i,(t,w) in enumerate(cols):
+                        c = row.cells[i]; _wc(c,t,bold=True,color=_WH,size=9,center=True,fill=fill)
+                        if w: c.width=_Cm(w)
 
-                def header_row(table, cols_data, bg="1F4E79"):
-                    row = table.rows[0]
-                    for i, (text, width) in enumerate(cols_data):
-                        cell = row.cells[i]
-                        add_cell(cell, text, bold=True, color=WHITE, size=9, center=True, bg=bg)
-                        cell.width = Cm(width)
+                def _fn(n, sign=False):
+                    return ("+" if (sign and n>=0) else "") + f"{n:,.0f} EUR".replace(",", " ")
 
-                # ── DOCUMENT ─────────────────────────────────────────────────
-                doc = Document()
+                def _fp(n):
+                    return f"{'+'if n>=0 else ''}{n:.1f}%"
 
-                # Marges de page
-                for section in doc.sections:
-                    section.top_margin    = Cm(2)
-                    section.bottom_margin = Cm(2)
-                    section.left_margin   = Cm(2.5)
-                    section.right_margin  = Cm(2)
+                def _sep(d, col="C0522A"):
+                    p=d.add_paragraph(); p.paragraph_format.space_before=_Pt(2); p.paragraph_format.space_after=_Pt(6)
+                    pr=p._p.get_or_add_pPr(); pb=_OE("w:pBdr"); bt=_OE("w:bottom")
+                    bt.set(_qn("w:val"),"single"); bt.set(_qn("w:sz"),"6"); bt.set(_qn("w:color"),col)
+                    pb.append(bt); pr.append(pb)
 
-                def add_para(text, bold=False, italic=False, size=10,
-                             color=None, align="left", space_before=6,
-                             space_after=6, line_spacing=None):
-                    p = doc.add_paragraph()
-                    p.paragraph_format.space_before = Pt(space_before)
-                    p.paragraph_format.space_after  = Pt(space_after)
-                    if line_spacing:
-                        p.paragraph_format.line_spacing = Pt(line_spacing)
-                    p.alignment = {
-                        "left": WD_ALIGN_PARAGRAPH.LEFT,
-                        "center": WD_ALIGN_PARAGRAPH.CENTER,
-                        "right": WD_ALIGN_PARAGRAPH.RIGHT,
-                        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
-                    }.get(align, WD_ALIGN_PARAGRAPH.LEFT)
-                    run = p.add_run(text)
-                    run.bold   = bold
-                    run.italic = italic
-                    run.font.size = Pt(size)
-                    run.font.name = "Arial"
-                    if color:
-                        run.font.color.rgb = color
+                def _P(d, text, bold=False, italic=False, size=10, color=None, align="left", sb=6, sa=6, line=None):
+                    p=d.add_paragraph(); p.paragraph_format.space_before=_Pt(sb); p.paragraph_format.space_after=_Pt(sa)
+                    if line: p.paragraph_format.line_spacing=_Pt(line)
+                    p.alignment={"left":_AP.LEFT,"center":_AP.CENTER,"right":_AP.RIGHT,"justify":_AP.JUSTIFY}.get(align,_AP.LEFT)
+                    r=p.add_run(text); r.bold=bold; r.italic=italic; r.font.size=_Pt(size); r.font.name="Arial"
+                    if color: r.font.color.rgb=color
                     return p
 
-                def add_mixed_para(runs_data, align="left", space_before=6, space_after=6):
-                    """runs_data = [(text, bold, italic, size, color), ...]"""
-                    p = doc.add_paragraph()
-                    p.paragraph_format.space_before = Pt(space_before)
-                    p.paragraph_format.space_after  = Pt(space_after)
-                    p.alignment = {
-                        "left":    WD_ALIGN_PARAGRAPH.LEFT,
-                        "center":  WD_ALIGN_PARAGRAPH.CENTER,
-                        "right":   WD_ALIGN_PARAGRAPH.RIGHT,
-                        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
-                    }.get(align, WD_ALIGN_PARAGRAPH.LEFT)
-                    for text, bold, italic, size, color in runs_data:
-                        run = p.add_run(text)
-                        run.bold   = bold
-                        run.italic = italic
-                        run.font.size = Pt(size)
-                        run.font.name = "Arial"
-                        if color:
-                            run.font.color.rgb = color
+                def _Pm(d, runs, align="left", sb=6, sa=6, keep_next=True):
+                    p=d.add_paragraph(); p.paragraph_format.space_before=_Pt(sb); p.paragraph_format.space_after=_Pt(sa)
+                    p.paragraph_format.keep_with_next=keep_next
+                    p.alignment={"left":_AP.LEFT,"center":_AP.CENTER,"right":_AP.RIGHT}.get(align,_AP.LEFT)
+                    for text,bold,italic,size,color in runs:
+                        r=p.add_run(text); r.bold=bold; r.italic=italic; r.font.size=_Pt(size); r.font.name="Arial"
+                        if color: r.font.color.rgb=color
                     return p
 
-                def add_separator(color_hex="C0522A"):
-                    p = doc.add_paragraph()
-                    p.paragraph_format.space_before = Pt(2)
-                    p.paragraph_format.space_after  = Pt(8)
-                    pPr = p._p.get_or_add_pPr()
-                    pBdr = OxmlElement('w:pBdr')
-                    bottom = OxmlElement('w:bottom')
-                    bottom.set(qn('w:val'), 'single')
-                    bottom.set(qn('w:sz'), '6')
-                    bottom.set(qn('w:color'), color_hex)
-                    pBdr.append(bottom)
-                    pPr.append(pBdr)
+                top_list  = [res_sorted.iloc[i] for i in range(min(nb_top, len(res_sorted)))]
+                flop_list = [res_sorted.iloc[-(i+1)] for i in range(min(nb_top, len(res_sorted)))]
 
-                def fmt_eur(n, sign=True):
-                    prefix = "+" if (sign and n >= 0) else ""
-                    return f"{prefix}{n:,.0f} €".replace(",", " ")
+                d = _Doc()
+                for s in d.sections:
+                    s.top_margin=_Cm(2); s.bottom_margin=_Cm(2); s.left_margin=_Cm(2.5); s.right_margin=_Cm(2)
 
-                def fmt_pct(n):
-                    prefix = "+" if n >= 0 else ""
-                    return f"{prefix}{n:.1f} %"
+                # En-tete
+                _P(d, nom_cabinet, bold=True, size=14, color=_MR, sb=0, sa=2)
+                _P(d, "Expert-comptable - Commissaire aux comptes", size=10, color=_RGB(0x55,0x55,0x55), sb=0, sa=2)
+                _P(d, "Membre de l'Ordre des Experts-Comptables", size=9, italic=True, color=_RGB(0x88,0x88,0x88), sb=0, sa=4)
+                pd=d.add_paragraph(); pd.alignment=_AP.RIGHT; pd.paragraph_format.space_before=_Pt(0); pd.paragraph_format.space_after=_Pt(4)
+                _mois_fr = {1:"janvier",2:"février",3:"mars",4:"avril",5:"mai",6:"juin",7:"juillet",8:"août",9:"septembre",10:"octobre",11:"novembre",12:"décembre"}
+                _date_fr = f"{date_rapport.day} {_mois_fr[date_rapport.month]} {date_rapport.year}"
+                rd=pd.add_run(f"Lille, le {_date_fr}"); rd.font.size=_Pt(10); rd.font.name="Arial"
+                _sep(d)
 
-                # ══ EN-TÊTE ══
-                add_para(nom_cabinet, bold=True, size=14, color=MARINE, space_before=0, space_after=2)
-                add_para("Expert-comptable — Commissaire aux comptes", size=10, color=RGBColor(0x55,0x55,0x55), space_before=0, space_after=2)
-                add_para("Membre de l'Ordre des Experts-Comptables", size=9, italic=True, color=RGBColor(0x88,0x88,0x88), space_before=0, space_after=4)
+                _P(d, "Monsieur le Directeur", bold=True, size=11, sb=4, sa=2)
+                _P(d, nom_editeur, size=11, sb=0, sa=2)
+                _P(d, "Siege social : Lille (59)", size=10, color=_RGB(0x55,0x55,0x55), sb=0, sa=10)
 
-                # Date à droite
-                p_date = doc.add_paragraph()
-                p_date.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                p_date.paragraph_format.space_before = Pt(0)
-                p_date.paragraph_format.space_after  = Pt(4)
-                r = p_date.add_run(f"Lille, le {date_rapport.strftime('%d %B %Y')}")
-                r.font.size = Pt(10); r.font.name = "Arial"
-                r = p_date.add_run(f"\nRéf. : RAPPORT-{exercice.replace('/','-')}-T1")
-                r.font.size = Pt(9); r.font.name = "Arial"; r.italic = True
-                r.font.color.rgb = RGBColor(0x88,0x88,0x88)
+                to=d.add_table(rows=1, cols=1); to.style="Table Grid"
+                co=to.rows[0].cells[0]; _shd(co,_BC); _brd(co)
+                po=co.paragraphs[0]; po.paragraph_format.space_before=_Pt(4); po.paragraph_format.space_after=_Pt(4)
+                r1o=po.add_run("Objet : "); r1o.bold=True; r1o.font.size=_Pt(10); r1o.font.name="Arial"; r1o.font.color.rgb=_MR
+                r2o=po.add_run(f"Rapport de pilotage analytique - Exercice {exercice} - Mission n° {ref_mission}"); r2o.font.size=_Pt(10); r2o.font.name="Arial"
 
-                add_separator()
+                _P(d, "", sb=10, sa=0)
+                _P(d, "Monsieur,", bold=True, size=11, sb=0, sa=6)
+                _P(d, f"Conformement aux diligences prevues dans notre lettre de mission n° {ref_mission} et a l'organisation trimestrielle de restitution convenue avec vous, nous avons l'honneur de vous adresser le present rapport de pilotage analytique relatif a l'exercice clos le {periode_fin}.", size=10, align="justify", sb=0, sa=6, line=14)
+                _P(d, f"Ce rapport a ete etabli a partir des donnees de votre comptabilite analytique pour la periode du {periode_debut} au {periode_fin}, traitees par notre outil Python VISION EDITION. Il porte sur l'ensemble des {nb_eans} ISBN actifs de votre catalogue.", size=10, align="justify", sb=0, sa=6, line=14)
+                _P(d, f"Nous attirons votre attention sur le point central suivant : si votre maison d'edition degage une marge brute globale de {_fp(taux_mb)}, la prise en compte des charges indirectes de structure conduit a un resultat analytique net de {_fn(mn_total, True)}. Cette situation appelle une analyse approfondie que nous vous soumettons ci-apres.", size=10, align="justify", sb=0, sa=10, line=14)
 
-                # Destinataire
-                add_para("Monsieur le Directeur", bold=True, size=11, space_before=4, space_after=2)
-                add_para(nom_editeur, size=11, space_before=0, space_after=2)
-                add_para("Siège social : Lille (59)", size=10, color=RGBColor(0x55,0x55,0x55), space_before=0, space_after=12)
+                # I
+                _Pm(d,[("I.   ",True,False,13,_TR),("SYNTHESE DE LA PERFORMANCE ANALYTIQUE",True,False,13,_MR)],sb=8,sa=4)
+                _sep(d)
+                _P(d,"L'analyse du grand livre analytique de l'exercice fait ressortir les resultats suivants :",size=10,sb=0,sa=6)
+                ts=d.add_table(rows=6,cols=3); ts.style="Table Grid"
+                _hr(ts,[("Indicateur",7),("Montant",3.5),("Commentaire",6)])
+                for i,(lbl,val,cmt,fl) in enumerate([
+                    ("CA net editeur",_fn(ca_total),f"{nb_eans} ISBN actifs",_BC),
+                    ("Charges directes",_fn(ca_total-mb_total),"Fabrication, droits, personnel","FFFFFF"),
+                    ("Marge brute sur ventes",_fn(mb_total,True),f"Taux : {_fp(taux_mb)}",_GC),
+                    ("Charges indirectes de structure",_fn(ci_total),f"Quote-part/ISBN : {ci_par_ean:.2f} EUR",_YC),
+                    ("Resultat analytique net",_fn(mn_total,True),"Apres affectation charges de structure",_RC if mn_total<0 else _GC),
+                ]):
+                    rw=ts.rows[i+1]
+                    _wc(rw.cells[0],lbl,bold=True,color=_MR,size=9,fill=fl)
+                    _wc(rw.cells[1],val,bold=True,center=True,size=10,color=_RGB(0xC0,0,0) if (i==4 and mn_total<0) else _MR,fill=fl)
+                    _wc(rw.cells[2],cmt,italic=True,size=8,color=_RGB(0x55,0x55,0x55),fill=fl)
+                _P(d,f"L'exercice {exercice} presente une marge brute de {_fn(mb_total,True)} ({_fp(taux_mb)}). Toutefois, les charges indirectes ({_fn(ci_total)}), reparties sur {nb_eans} ISBN actifs a raison de {ci_par_ean:.2f} EUR/titre, conduisent a un resultat analytique net de {_fn(mn_total,True)}.",size=10,align="justify",sb=6,sa=10,line=14)
 
-                # Objet
-                tbl_obj = doc.add_table(rows=1, cols=1)
-                tbl_obj.style = "Table Grid"
-                set_cell_bg(tbl_obj.rows[0].cells[0], "D6E4F0")
-                set_cell_borders(tbl_obj.rows[0].cells[0])
-                c_obj = tbl_obj.rows[0].cells[0]
-                p_obj = c_obj.paragraphs[0]
-                r1 = p_obj.add_run("Objet : ")
-                r1.bold = True; r1.font.size = Pt(10); r1.font.name = "Arial"
-                r1.font.color.rgb = MARINE
-                r2 = p_obj.add_run(f"Rapport de pilotage analytique — Exercice {exercice} — Mission conforme à la lettre de mission n° {ref_mission}")
-                r2.font.size = Pt(10); r2.font.name = "Arial"
+                # II
+                _Pm(d,[("II.   ",True,False,13,_TR),("ANALYSE DE LA RENTABILITE PAR TITRE",True,False,13,_MR)],sb=8,sa=4)
+                _sep(d)
+                _P(d,f"Sur les {nb_eans} ISBN actifs au catalogue, {n_pos} degagent une marge brute positive et {n_neg} affichent une marge brute negative ({n_neg/max(nb_eans,1)*100:.1f} % du catalogue).",size=10,align="justify",sb=0,sa=8,line=14)
 
-                doc.add_paragraph().paragraph_format.space_before = Pt(12)
+                _P(d,f"A. Les {nb_top} titres les plus contributifs",bold=True,size=10,color=_MR,sb=4,sa=4)
+                tt=d.add_table(rows=nb_top+1,cols=5); tt.style="Table Grid"
+                _hr(tt,[("Rg",0.8),("Titre",5.5),("CA net (EUR)",2.2),("Marge brute (EUR)",2.8),("Statut",1.2)])
+                for i,rd_ in enumerate(top_list):
+                    bg=_LC if i%2==0 else "FFFFFF"; rw=tt.rows[i+1]
+                    _wc(rw.cells[0],str(i+1),bold=True,center=True,size=9,color=_TR,fill=bg)
+                    _wc(rw.cells[1],str(rd_["Titre"])[:44],bold=True,size=9,color=_MR,fill=bg)
+                    _wc(rw.cells[2],f"{rd_['CA net']:,.0f} EUR".replace(",", " "),center=True,size=9,fill=bg)
+                    _wc(rw.cells[3],f"{rd_['Marge brute']:+,.0f} EUR".replace(",", " "),bold=True,center=True,size=10,color=_RGB(0x21,0x73,0x46),fill=_GC)
+                    _wc(rw.cells[4],"OK",bold=True,center=True,size=9,color=_RGB(0x21,0x73,0x46),fill=_GC)
+                if top_list:
+                    _P(d,f"Nous attirons votre attention sur '{top_list[0]['Titre']}' qui, avec une marge brute de {top_list[0]['Marge brute']:+,.0f} EUR, constitue le titre le plus contributif de votre catalogue.",size=10,align="justify",sb=6,sa=10,line=14)
 
-                # ══ INTRODUCTION ══
-                add_para("Monsieur,", bold=True, size=11, space_before=0, space_after=8)
-                add_para(
-                    f"Conformément aux diligences prévues dans notre lettre de mission n° {ref_mission} et à l'organisation trimestrielle de restitution convenue avec vous, nous avons l'honneur de vous adresser le présent rapport de pilotage analytique relatif à l'exercice clos le {periode_fin}.",
-                    size=10, align="justify", space_before=0, space_after=6, line_spacing=14
-                )
-                add_para(
-                    f"Ce rapport a été établi à partir des données de votre comptabilité analytique pour la période du {periode_debut} au {periode_fin}, traitées par notre outil Python VISION ÉDITION. Il porte sur l'ensemble des {nb_eans} ISBN actifs de votre catalogue sur l'exercice.",
-                    size=10, align="justify", space_before=0, space_after=6, line_spacing=14
-                )
-                add_para(
-                    f"Nous attirons d'emblée votre attention sur le point central suivant : si votre maison d'édition dégage une marge brute globale satisfaisante sur les ventes ({fmt_pct(taux_mb)}), la prise en compte des charges indirectes de structure conduit à un résultat analytique net de {fmt_eur(mn_total)}. Cette situation appelle une analyse approfondie et des décisions éditoriales que nous vous soumettons dans le présent rapport.",
-                    size=10, align="justify", space_before=0, space_after=12, line_spacing=14
-                )
+                _P(d,f"B. Les {nb_top} titres les plus deficitaires - Action corrective requise",bold=True,size=10,color=_RGB(0xC0,0,0),sb=4,sa=4)
+                tf=d.add_table(rows=nb_top+1,cols=5); tf.style="Table Grid"
+                _hr(tf,[("Rg",0.8),("Titre",5.5),("CA net (EUR)",2.2),("Marge brute (EUR)",2.8),("Statut",1.2)],fill="C00000")
+                for i,rd_ in enumerate(flop_list):
+                    bg="FFF5F5" if i%2==0 else "FFFFFF"; rw=tf.rows[i+1]
+                    _wc(rw.cells[0],str(i+1),bold=True,center=True,size=9,color=_RGB(0xC0,0,0),fill=bg)
+                    _wc(rw.cells[1],str(rd_["Titre"])[:44],bold=True,size=9,color=_RGB(0xC0,0,0),fill=bg)
+                    _wc(rw.cells[2],f"{rd_['CA net']:,.0f} EUR".replace(",", " "),center=True,size=9,fill=bg)
+                    _wc(rw.cells[3],f"{rd_['Marge brute']:+,.0f} EUR".replace(",", " "),bold=True,center=True,size=10,color=_RGB(0xC0,0,0),fill=_RC)
+                    _wc(rw.cells[4],"Alerte",bold=True,center=True,size=9,color=_RGB(0xC0,0,0),fill=_RC)
+                if flop_list:
+                    _P(d,f"Nous appelons votre attention sur '{flop_list[0]['Titre']}' qui accuse une perte de {abs(flop_list[0]['Marge brute']):,.0f} EUR. L'ensemble de ces titres deficitaires appelle les mesures correctives detaillees dans la section IV.",size=10,align="justify",sb=6,sa=10,line=14)
 
-                # ══ SECTION I — SYNTHÈSE ══
-                add_mixed_para([
-                    ("I.  ", True, False, 13, TERRA),
-                    ("SYNTHÈSE DE LA PERFORMANCE ANALYTIQUE", True, False, 13, MARINE),
-                ], space_before=8, space_after=4)
-                add_separator()
+                # III
+                _Pm(d,[("III.   ",True,False,13,_TR),("CHARGES INDIRECTES DE STRUCTURE",True,False,13,_MR)],sb=8,sa=4)
+                _sep(d)
+                _P(d,f"Les charges indirectes de structure s'elevent a {_fn(ci_total)}, soit {ci_total/max(ca_total,1)*100:.1f} % du chiffre d'affaires net. Avec {nb_eans} ISBN actifs, chaque titre doit degager une marge brute minimale de {ci_par_ean:.0f} EUR pour couvrir sa quote-part de structure.",size=10,align="justify",sb=0,sa=10,line=14)
 
-                add_para("L'analyse du grand livre analytique de l'exercice fait ressortir les résultats suivants :", size=10, space_before=0, space_after=6)
+                # IV
+                _Pm(d,[("IV.   ",True,False,13,_TR),("RECOMMANDATIONS ET PLAN D'ACTION",True,False,13,_MR)],sb=8,sa=4)
+                _sep(d)
+                _P(d,"Au vu de l'analyse ci-avant, nous vous soumettons les recommandations suivantes :",size=10,sb=0,sa=6)
+                tr=d.add_table(rows=5,cols=4); tr.style="Table Grid"
+                _hr(tr,[("Priorite",1.5),("Recommandation",5.5),("Action",4),("Delai",2)])
+                for i,(prio,rec,action,delai,bg) in enumerate([
+                    ("1 - URGENT",f"Analyse des {n_neg} titres deficitaires","Decision maintien ou arret commercial","Immediat",_RC),
+                    ("2 - URGENT","Arret reimpression des titres deficitaires","Gel des commandes impression","Immediat","FFFFFF"),
+                    ("3 - IMPORTANT","Reexamen des charges indirectes de structure","Audit des postes de charges","T2 2026",_RC),
+                    ("4 - IMPORTANT",f"Reimpression prioritaire des {nb_top} titres porteurs","Lancement procedure reimpression","T2 2026","FFFFFF"),
+                ]):
+                    rw=tr.rows[i+1]; iu="URGENT" in prio
+                    _wc(rw.cells[0],prio,bold=True,center=True,size=8,color=_RGB(0xC0,0,0) if iu else _RGB(0xA6,0x7C,0),fill=_RC if iu else _YC)
+                    _wc(rw.cells[1],rec,bold=True,size=9,fill=bg)
+                    _wc(rw.cells[2],action,size=9,fill=bg)
+                    _wc(rw.cells[3],delai,center=True,bold=True,size=9,color=_RGB(0xC0,0,0) if iu else _RGB(0xA6,0x7C,0),fill=bg)
 
-                # Tableau synthèse
-                tbl_s = doc.add_table(rows=6, cols=3)
-                tbl_s.style = "Table Grid"
-                hdrs = [("Indicateur", 7), ("Montant", 3.5), ("Commentaire", 6)]
-                header_row(tbl_s, hdrs)
-                synth_rows = [
-                    ("Chiffre d'affaires net éditeur", fmt_eur(ca_total, sign=False), f"{nb_eans} ISBN actifs", "D6E4F0"),
-                    ("Charges directes de production",  fmt_eur(ca_total - mb_total, sign=False), "Fabrication, droits, personnel direct", "FFFFFF"),
-                    ("Marge brute sur ventes",          fmt_eur(mb_total), f"Taux : {fmt_pct(taux_mb)}", "E2EFDA" if mb_total > 0 else "FFDDD9"),
-                    ("Charges indirectes de structure", fmt_eur(ci_total, sign=False), f"Quote-part/ISBN : {ci_par_ean:,.2f} €".replace(",", " "), "FFF2CC"),
-                    ("Résultat analytique net",         fmt_eur(mn_total), "Après affectation charges de structure", "E2EFDA" if mn_total > 0 else "FFDDD9"),
-                ]
-                for i, (label, val, comment, bg_hex) in enumerate(synth_rows):
-                    row = tbl_s.rows[i+1]
-                    add_cell(row.cells[0], label, bold=True, color=MARINE, size=9, bg=bg_hex)
-                    add_cell(row.cells[1], val, bold=True, center=True, size=10,
-                             color=RGBColor(0x21,0x73,0x46) if "+" in val else RGBColor(0xC0,0,0) if "-" in val else MARINE,
-                             bg=bg_hex)
-                    add_cell(row.cells[2], comment, italic=True, size=8, color=RGBColor(0x55,0x55,0x55), bg=bg_hex)
+                _P(d,"",sb=10,sa=0)
 
-                doc.add_paragraph().paragraph_format.space_before = Pt(6)
-                add_para(
-                    f"L'exercice {exercice} présente une situation contrastée. D'une part, la marge brute dégagée sur les ventes est de {fmt_eur(mb_total)} ({fmt_pct(taux_mb)}), témoignant d'une activité éditoriale réelle. D'autre part, le poids des charges indirectes ({fmt_eur(ci_total, sign=False)}), réparties sur {nb_eans} ISBN actifs à raison de {ci_par_ean:,.2f} €/titre, conduit à un résultat analytique net de {fmt_eur(mn_total)}. Ce déséquilibre constitue le principal enjeu de pilotage de votre maison d'édition.",
-                    size=10, align="justify", space_before=4, space_after=12, line_spacing=14
-                )
-
-                # ══ SECTION II — ANALYSE PAR TITRE ══
-                add_mixed_para([
-                    ("II.  ", True, False, 13, TERRA),
-                    ("ANALYSE DE LA RENTABILITÉ PAR TITRE", True, False, 13, MARINE),
-                ], space_before=8, space_after=4)
-                add_separator()
-
-                add_para(
-                    f"Sur les {nb_eans} ISBN actifs au catalogue, {n_positifs} dégagent une marge brute positive et {n_negatifs} affichent une marge brute négative ({n_negatifs/nb_eans*100:.1f} % du catalogue). Nous présentons ci-après les {nb_top} titres les plus contributifs et les {nb_top} titres les plus déficitaires.",
-                    size=10, align="justify", space_before=0, space_after=8, line_spacing=14
-                )
-
-                # Helper tableau titres
-                def table_titres(df_titres, bg_header, title_text):
-                    add_para(title_text, bold=True, size=10, color=MARINE if "+" in title_text else RGBColor(0xC0,0,0), space_before=4, space_after=4)
-                    n = len(df_titres)
-                    tbl = doc.add_table(rows=n+1, cols=5)
-                    tbl.style = "Table Grid"
-                    hdrs2 = [("Rg", 0.8), ("Titre", 6), ("CA net (€)", 2.2), ("Marge brute (€)", 2.8), ("Statut", 1.2)]
-                    header_row(tbl, hdrs2, bg=bg_header)
-                    for i, (_, row_d) in enumerate(df_titres.iterrows()):
-                        bg = "F5E6DF" if i % 2 == 0 else "FFFFFF"
-                        mb_val = row_d["Marge brute"]
-                        is_neg = mb_val < 0
-                        row = tbl.rows[i+1]
-                        add_cell(row.cells[0], str(i+1), bold=True, center=True, size=9, color=TERRA, bg=bg)
-                        add_cell(row.cells[1], str(row_d["Titre"])[:50], bold=True, size=9,
-                                 color=RGBColor(0xC0,0,0) if is_neg else MARINE, bg=bg)
-                        add_cell(row.cells[2], f"{row_d['CA net']:,.0f}".replace(",", " "), center=True, size=9, bg=bg)
-                        add_cell(row.cells[3], fmt_eur(mb_val), bold=True, center=True, size=10,
-                                 color=RGBColor(0xC0,0,0) if is_neg else RGBColor(0x21,0x73,0x46),
-                                 bg="FFDDD9" if is_neg else "E2EFDA")
-                        signal = "🔴" if is_neg else ("🟡" if mb_val/max(row_d["CA net"],1)*100 < 15 else "🟢")
-                        add_cell(row.cells[4], signal, center=True, size=11,
-                                 bg="FFDDD9" if is_neg else ("FFF2CC" if signal == "🟡" else "E2EFDA"))
-                    doc.add_paragraph().paragraph_format.space_before = Pt(4)
-
-                table_titres(top_n, "1F4E79", f"A. Les {nb_top} titres les plus contributifs à la marge brute ✓")
-
-                top1 = top_n.iloc[0]
-                add_para(
-                    f"Nous attirons particulièrement votre attention sur « {top1['Titre']} » qui, avec une marge brute de {fmt_eur(top1['Marge brute'])} ({fmt_pct(top1['Marge brute']/max(top1['CA net'],1)*100)}), constitue le titre le plus contributif de votre catalogue. Nous vous recommandons de veiller à sa disponibilité et d'envisager, le cas échéant, une réimpression anticipée.",
-                    size=10, align="justify", space_before=0, space_after=10, line_spacing=14
-                )
-
-                table_titres(flop_n, "C00000", f"B. Les {nb_top} titres les plus déficitaires — Action corrective requise ⚠")
-
-                flop1 = flop_n.iloc[0]
-                add_para(
-                    f"Nous appelons particulièrement votre attention sur « {flop1['Titre']} » qui accuse une perte de {fmt_eur(abs(flop1['Marge brute']), sign=False)} sur l'exercice. L'ensemble de ces titres déficitaires appelle les mesures correctives détaillées dans la section IV du présent rapport.",
-                    size=10, align="justify", space_before=0, space_after=12, line_spacing=14
-                )
-
-                # ══ SECTION III — CHARGES INDIRECTES ══
-                add_mixed_para([
-                    ("III.  ", True, False, 13, TERRA),
-                    ("ANALYSE DES CHARGES INDIRECTES DE STRUCTURE", True, False, 13, MARINE),
-                ], space_before=8, space_after=4)
-                add_separator()
-
-                add_para(
-                    f"Les charges indirectes de structure s'élèvent à {fmt_eur(ci_total, sign=False)} sur l'exercice, soit {ci_total/max(ca_total,1)*100:.1f} % du chiffre d'affaires net. Ce niveau est significativement supérieur à la marge brute dégagée sur les ventes, ce qui explique le résultat analytique net négatif observé.",
-                    size=10, align="justify", space_before=0, space_after=6, line_spacing=14
-                )
-                add_para(
-                    f"La méthode de répartition retenue est une clé forfaitaire au prorata du nombre de titres actifs au catalogue, soit {ci_par_ean:,.2f} € par ISBN. Avec {nb_eans} ISBN actifs, chaque titre doit dégager une marge brute minimale de {ci_par_ean:,.0f} € pour simplement couvrir sa quote-part de charges de structure — avant même de contribuer positivement au résultat global.",
-                    size=10, align="justify", space_before=0, space_after=12, line_spacing=14
-                )
-
-                # ══ SECTION IV — RECOMMANDATIONS ══
-                add_mixed_para([
-                    ("IV.  ", True, False, 13, TERRA),
-                    ("RECOMMANDATIONS ET PLAN D'ACTION", True, False, 13, MARINE),
-                ], space_before=8, space_after=4)
-                add_separator()
-
-                add_para("Au vu de l'analyse développée ci-avant, nous vous soumettons les recommandations suivantes, hiérarchisées par ordre de priorité :", size=10, space_before=0, space_after=6)
-
-                tbl_r = doc.add_table(rows=5, cols=4)
-                tbl_r.style = "Table Grid"
-                hdrs3 = [("Priorité", 1.5), ("Recommandation", 5.5), ("Action attendue", 4), ("Délai", 2)]
-                header_row(tbl_r, hdrs3)
-                recommandations = [
-                    ("🔴 1", f"Analyse des {n_negatifs} titres déficitaires", "Décision de maintien ou arrêt commercial", "Immédiat", "FFF5F5"),
-                    ("🔴 2", f"Arrêt réimpression des titres structurellement déficitaires", "Gel des commandes d'impression", "Immédiat", "FFFFFF"),
-                    ("🟡 3", "Réexamen du niveau des charges indirectes de structure", "Audit des postes de charges de structure", "T2 2026", "FFF5F5"),
-                    (f"🟡 4", f"Réimpression prioritaire des {nb_top} titres porteurs", "Lancement procédure de réimpression", "T2 2026", "FFFFFF"),
-                ]
-                for i, (prio, rec, action, delai, bg) in enumerate(recommandations):
-                    row = tbl_r.rows[i+1]
-                    is_red = "🔴" in prio
-                    add_cell(row.cells[0], prio, bold=True, center=True, size=9,
-                             color=RGBColor(0xC0,0,0) if is_red else RGBColor(0xA6,0x7C,0),
-                             bg="FFDDD9" if is_red else "FFF2CC")
-                    add_cell(row.cells[1], rec, bold=True, size=9, bg=bg)
-                    add_cell(row.cells[2], action, size=9, bg=bg)
-                    add_cell(row.cells[3], delai, center=True, bold=True, size=9,
-                             color=RGBColor(0xC0,0,0) if is_red else RGBColor(0xA6,0x7C,0), bg=bg)
-
-                doc.add_paragraph().paragraph_format.space_before = Pt(12)
-
-                # ══ CONCLUSION ══
-                add_mixed_para([
-                    ("V.  ", True, False, 13, TERRA),
-                    ("CONCLUSION ET PROCHAINES ÉTAPES", True, False, 13, MARINE),
-                ], space_before=8, space_after=4)
-                add_separator()
-
-                add_para(
-                    "Le présent rapport met en évidence la nécessité d'engager rapidement une réflexion sur la structure de votre catalogue et sur le niveau de vos charges indirectes. Si votre activité éditoriale témoigne d'une vraie vitalité sur les ventes, l'équilibre économique global reste fragile tant que le poids de la structure n'est pas maîtrisé.",
-                    size=10, align="justify", space_before=0, space_after=6, line_spacing=14
-                )
-                add_para(
-                    "Nous vous proposons de nous réunir dans les prochaines semaines afin de discuter des recommandations formulées ci-dessus et d'arrêter ensemble les décisions à mettre en œuvre. Un plan d'action formalisé vous sera remis à l'issue de cette réunion.",
-                    size=10, align="justify", space_before=0, space_after=6, line_spacing=14
-                )
-                add_para(
-                    "Nous demeurons à votre entière disposition pour tout complément d'information et vous prions d'agréer, Monsieur, l'expression de nos salutations distinguées.",
-                    size=10, align="justify", space_before=0, space_after=16, line_spacing=14
-                )
+                # V
+                _Pm(d,[("V.   ",True,False,13,_TR),("CONCLUSION ET PROCHAINES ETAPES",True,False,13,_MR)],sb=8,sa=4)
+                _sep(d)
+                _P(d,"Le present rapport met en evidence la necessite d'engager rapidement une reflexion sur la structure de votre catalogue et sur le niveau de vos charges indirectes. Nous vous proposons de nous reunir dans les prochaines semaines afin de discuter des recommandations formulees ci-dessus.",size=10,align="justify",sb=0,sa=6,line=14)
+                _P(d,"Nous demeurons a votre entiere disposition et vous prions d'agreer, Monsieur, l'expression de nos salutations distinguees.",size=10,align="justify",sb=0,sa=16,line=14)
 
                 # Signatures
-                tbl_sig = doc.add_table(rows=1, cols=2)
-                tbl_sig.style = "Table Grid"
-                for cell_s, title_s, color_s in [
-                    (tbl_sig.rows[0].cells[0], f"L'Expert-Comptable\n{nom_cabinet}", "1F4E79"),
-                    (tbl_sig.rows[0].cells[1], f"Le Dirigeant\n{nom_editeur}", "C0522A"),
-                ]:
-                    set_cell_bg(cell_s, "F5E6DF" if "Dirigeant" in title_s else "D6E4F0")
-                    set_cell_borders(cell_s)
-                    p_s = cell_s.paragraphs[0]
-                    for line in [title_s, "\nSignature : ______________________", "\nDate : ___________________________"]:
-                        r_s = p_s.add_run(line)
-                        r_s.font.size = Pt(9); r_s.font.name = "Arial"
-                        r_s.font.color.rgb = RGBColor(*bytes.fromhex(color_s))
-                        r_s.bold = "\n" not in line
+                ts2=d.add_table(rows=1,cols=2); ts2.style="Table Grid"
+                for cs,ti,fi,ci_ in [(ts2.rows[0].cells[0],f"L'Expert-Comptable\n{nom_cabinet}",_BC,_MR),(ts2.rows[0].cells[1],f"Le Dirigeant\n{nom_editeur}",_LC,_TR)]:
+                    _shd(cs,fi); _brd(cs)
+                    ps=cs.paragraphs[0]; ps.paragraph_format.space_before=_Pt(6); ps.paragraph_format.space_after=_Pt(6)
+                    for j,li in enumerate([ti,"\n\nSignature : ______________________","\nDate : ___________________________"]):
+                        rs=ps.add_run(li); rs.font.size=_Pt(9); rs.font.name="Arial"; rs.bold=(j==0); rs.font.color.rgb=ci_
 
-                doc.add_paragraph().paragraph_format.space_before = Pt(8)
+                # Note
+                _P(d,"",sb=8,sa=0)
+                pn=d.add_paragraph(); pn.paragraph_format.space_before=_Pt(4); pn.paragraph_format.space_after=_Pt(4)
+                rn1=pn.add_run("Note methodologique : "); rn1.bold=True; rn1.font.size=_Pt(8); rn1.font.name="Arial"; rn1.font.color.rgb=_RGB(0x55,0x55,0x55)
+                an="Titres anonymises. " if mode_anon else ""
+                rn2=pn.add_run(f"Rapport genere automatiquement par Python VISION EDITION ({periode_debut} au {periode_fin}, {nb_eans} ISBN actifs). {an}Charges indirectes ({_fn(ci_total)}) reparties forfaitairement ({ci_par_ean:.2f} EUR/titre). Source : comptabilite analytique {nom_editeur} - exercice {exercice} - donnees provisoires.")
+                rn2.italic=True; rn2.font.size=_Pt(8); rn2.font.name="Arial"; rn2.font.color.rgb=_RGB(0x77,0x77,0x77)
 
-                # Note méthodologique
-                p_note = doc.add_paragraph()
-                p_note.paragraph_format.space_before = Pt(8)
-                p_note.paragraph_format.space_after  = Pt(4)
-                pPr = p_note._p.get_or_add_pPr()
-                shd = OxmlElement('w:shd')
-                shd.set(qn('w:val'), 'clear'); shd.set(qn('w:color'), 'auto')
-                shd.set(qn('w:fill'), 'F2F2F2'); pPr.append(shd)
-                r_n1 = p_note.add_run("Note méthodologique — ")
-                r_n1.bold = True; r_n1.font.size = Pt(8); r_n1.font.name = "Arial"
-                r_n1.font.color.rgb = RGBColor(0x55,0x55,0x55)
-                r_n2 = p_note.add_run(
-                    f"Ce rapport a été généré automatiquement par Python VISION ÉDITION à partir du grand livre analytique ({periode_debut} au {periode_fin}, {nb_eans} ISBN actifs). "
-                    f"Les charges indirectes ({fmt_eur(ci_total, sign=False)}) sont réparties forfaitairement au prorata du nombre de titres actifs ({ci_par_ean:,.2f} €/titre). "
-                    + ("Les titres et EAN ont été anonymisés. " if mode_anon else "")
-                    + f"Source : comptabilité analytique {nom_editeur} — exercice {exercice} — données provisoires."
-                )
-                r_n2.italic = True; r_n2.font.size = Pt(8); r_n2.font.name = "Arial"
-                r_n2.font.color.rgb = RGBColor(0x77,0x77,0x77)
-
-                # ── EXPORT ──────────────────────────────────────────────────
-                buf = BytesIO()
-                doc.save(buf)
-                buf.seek(0)
-
-                anon_suffix = "_anon" if mode_anon else ""
-                nom_fichier = f"Rapport_Pilotage_{nom_editeur.replace(' ', '_').replace('é','e').replace('è','e')}_{exercice.replace('/','_')}{anon_suffix}.docx"
-
+                buf=_BIO(); d.save(buf); buf.seek(0)
+                sfx="_anon" if mode_anon else ""
+                fn=f"Rapport_Pilotage_{nom_editeur[:20].replace(' ','_')}_{exercice.replace('/','_')}{sfx}.docx"
                 st.success("✅ Rapport généré avec succès !")
-                st.download_button(
-                    label="⬇️ Télécharger le rapport Word",
-                    data=buf,
-                    file_name=nom_fichier,
+                st.download_button(label="⬇️ Télécharger le rapport Word", data=buf, file_name=fn,
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                    type="primary"
-                )
+                    use_container_width=True, type="primary")
 
             except ImportError:
-                st.error("❌ La bibliothèque python-docx n'est pas installée. Ajoutez `python-docx` dans votre requirements.txt.")
+                st.error("❌ python-docx non installé. Ajoutez `python-docx` dans requirements.txt.")
             except Exception as e:
-                st.error(f"❌ Erreur lors de la génération : {str(e)}")
+                st.error(f"❌ Erreur : {str(e)}")
                 st.exception(e)
-
 
 # =====================
 # FOOTER
