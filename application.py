@@ -3786,7 +3786,7 @@ Sois précis, factuel et orienté action."""
 # À ajouter dans la liste des pages :
 #   "📄 Rapport de pilotage"
 # Et dans le bloc elif :
-#   elif page == "📄 Rapport de pilotage":
+elif page == "📄 Rapport de pilotage":
     st.header("📄 Rapport de pilotage analytique")
     st.markdown("*Génération automatique du rapport de restitution au dirigeant — Format Word professionnel*")
 
