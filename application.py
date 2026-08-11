@@ -3825,20 +3825,31 @@ elif page == "📄 Rapport de pilotage":
     mapping = obtenir_mapping_anonymisation(df)
     res["Titre"] = res["Code_Analytique"].apply(lambda c: mapping.get(c, c) if mode_anon else label_affiche(c, df))
 
-    # Charges indirectes : chercher dans Code_Analytique ET dans les libelles_indirects paramétrés
-    libelles_ci = params.get("libelles_indirects", [])
-    valeurs_ci  = ["CHARGES INDIRECTES", "FRAIS GENERAUX", "CHARGES INDIRECTES REPARTIES"] + [x.upper() for x in libelles_ci]
-    mask_ci     = df["Code_Analytique"].astype(str).str.upper().isin(valeurs_ci)
-    ci_total    = df[mask_ci]["Débit"].sum() - df[mask_ci]["Crédit"].sum()
-    # Fallback : si pas trouvé, calculer depuis la colonne Famille_Analytique si elle existe
+    # Calcul aligné sur le tableau de bord — utiliser les mêmes mask_ pour cohérence
+    df_v_   = df[mask_ventes(df, params)]
+    df_r_   = df[mask_retours(df, params)]
+    df_rem_ = df[mask_remises(df, params)]
+    df_c_   = df[mask_charges(df, params)]
+    net_prov_ = 0
+    if params.get("provisions_reprises"):
+        _mp = df["Compte"].astype(str).str.startswith(tuple(params["provisions_reprises"]))
+        net_prov_ = df[_mp]["Crédit"].sum() - df[_mp]["Débit"].sum()
+    ca_total  = (df_v_["Crédit"].sum() - df_v_["Débit"].sum()
+                 - (df_r_["Débit"].sum() - df_r_["Crédit"].sum())
+                 - (df_rem_["Débit"].sum() - df_rem_["Crédit"].sum()))
+    charges_tot_ = (df_c_["Débit"].sum() - df_c_["Crédit"].sum()) - net_prov_
+    mn_total  = ca_total - charges_tot_
+    # Charges indirectes pour information
+    valeurs_ci = ["CHARGES INDIRECTES", "FRAIS GENERAUX", "CHARGES INDIRECTES REPARTIES"]
+    valeurs_ci += [x.upper() for x in params.get("libelles_indirects", [])]
+    mask_ci    = df["Code_Analytique"].astype(str).str.upper().isin(valeurs_ci)
+    ci_total   = df[mask_ci]["Débit"].sum() - df[mask_ci]["Crédit"].sum()
     if ci_total == 0 and "Famille_Analytique" in df.columns:
         mask_ci2 = df["Famille_Analytique"].astype(str).str.upper().str.contains("INDIRECT|STRUCTURE|GENERAUX", na=False)
         ci_total = df[mask_ci2]["Débit"].sum() - df[mask_ci2]["Crédit"].sum()
     nb_eans    = len(titres_actifs)
     ci_par_ean = ci_total / nb_eans if nb_eans > 0 else 0
-    ca_total   = res["CA net"].sum()
     mb_total   = res["Marge brute"].sum()
-    mn_total   = res["Résultat net"].sum()
     taux_mb    = (mb_total / ca_total * 100) if ca_total > 0 else 0
     n_pos      = (res["Marge brute"] > 0).sum()
     n_neg      = (res["Marge brute"] <= 0).sum()
