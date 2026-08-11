@@ -3787,19 +3787,6 @@ Sois précis, factuel et orienté action."""
 #   "📄 Rapport de pilotage"
 # Et dans le bloc elif :
 #   elif page == "📄 Rapport de pilotage":
-#       [coller ce code]
-# =====================
-
-# ---- IMPORTS SUPPLÉMENTAIRES À AJOUTER EN TÊTE DE FICHIER ----
-# from docx import Document
-# from docx.shared import Pt, Cm, RGBColor
-# from docx.enum.text import WD_ALIGN_PARAGRAPH
-# from docx.enum.table import WD_ALIGN_VERTICAL
-# from docx.oxml.ns import qn
-# from docx.oxml import OxmlElement
-# import datetime
-
-elif page == "📄 Rapport de pilotage":
     st.header("📄 Rapport de pilotage analytique")
     st.markdown("*Génération automatique du rapport de restitution au dirigeant — Format Word professionnel*")
 
