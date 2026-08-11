@@ -6,3 +6,4 @@ openpyxl
 qrcode[pil]
 Pillow
 anthropic
+python-docx
