@@ -16,6 +16,9 @@ import plotly.graph_objects as go
 import qrcode
 from PIL import Image
 import anthropic
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 try:
     from docx import Document
@@ -93,6 +96,79 @@ def verifier_login(username, password, role_attendu=None):
                     "dossier_id": did, "dossier_nom": dos["nom"]}
     return {"ok": False}
 
+
+# ============================================================
+# SYSTÈME DE NOTIFICATIONS
+# ============================================================
+
+def envoyer_email(destinataire, sujet, corps, nom_cabinet="CAB EDITION"):
+    """Envoie un email via Gmail SMTP. Requiert GMAIL_ADDRESS et
+    GMAIL_APP_PASSWORD dans les secrets Streamlit."""
+    try:
+        gmail_addr = st.secrets.get("GMAIL_ADDRESS", "")
+        gmail_pw   = st.secrets.get("GMAIL_APP_PASSWORD", "")
+        if not gmail_addr or not gmail_pw:
+            return False, "Identifiants Gmail non configurés dans les secrets Streamlit."
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"[VISION EDITION] {sujet}"
+        msg["From"]    = f"{nom_cabinet} <{gmail_addr}>"
+        msg["To"]      = destinataire
+
+        corps_html = f"""
+        <html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
+        <div style="background:#1F4E79;padding:20px;border-radius:8px 8px 0 0">
+            <h2 style="color:white;margin:0">📚 VISION EDITION</h2>
+            <p style="color:#D6E4F0;margin:5px 0 0 0;font-size:13px">{nom_cabinet}</p>
+        </div>
+        <div style="background:#f8f9fa;padding:24px;border:1px solid #e0e0e0;border-radius:0 0 8px 8px">
+            {corps.replace(chr(10), '<br>')}
+            <hr style="margin:20px 0;border:none;border-top:1px solid #e0e0e0">
+            <p style="color:#888;font-size:12px">
+                Ce message a été envoyé automatiquement depuis VISION EDITION.<br>
+                Pour consulter votre tableau de bord, connectez-vous à l'application.
+            </p>
+        </div>
+        </body></html>
+        """
+        msg.attach(MIMEText(corps, "plain", "utf-8"))
+        msg.attach(MIMEText(corps_html, "html", "utf-8"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(gmail_addr, gmail_pw)
+            smtp.sendmail(gmail_addr, destinataire, msg.as_string())
+        return True, "Email envoyé avec succès."
+    except smtplib.SMTPAuthenticationError:
+        return False, "Erreur d'authentification Gmail. Vérifiez GMAIL_APP_PASSWORD dans les secrets."
+    except smtplib.SMTPException as e:
+        return False, f"Erreur SMTP : {e}"
+    except Exception as e:
+        return False, f"Erreur : {e}"
+
+def ajouter_notification(dossier_id, message, type_notif="info"):
+    """Ajoute une notification in-app dans le dossier."""
+    dos = get_dossier(dossier_id)
+    if "notifications" not in dos:
+        dos["notifications"] = []
+    dos["notifications"].append({
+        "message": message,
+        "type": type_notif,
+        "date": _dt.datetime.now().strftime("%d/%m/%Y à %Hh%M"),
+        "lu": False
+    })
+    save_dossier(dossier_id, dos)
+
+def marquer_notifications_lues(dossier_id):
+    """Marque toutes les notifications comme lues."""
+    dos = get_dossier(dossier_id)
+    for n in dos.get("notifications", []):
+        n["lu"] = True
+    save_dossier(dossier_id, dos)
+
+def nb_notifs_non_lues(dossier_id):
+    dos = get_dossier(dossier_id)
+    return sum(1 for n in dos.get("notifications", []) if not n["lu"])
+
 def get_dossier(dossier_id):
     init_cabinet()
     return st.session_state["cabinet"]["dossiers"].get(dossier_id, {})
@@ -165,6 +241,9 @@ with st.sidebar:
     elif role == "dirigeant":
         dossier_actif = get_dossier(st.session_state["dossier_id"])
         st.caption(f"Dirigeant — {dossier_actif.get('nom', '')}")
+        nb_nl = nb_notifs_non_lues(st.session_state["dossier_id"])
+        if nb_nl > 0:
+            st.warning(f"🔔 {nb_nl} message(s) non lu(s) de votre cabinet")
     st.divider()
 
     if role == "ec":
@@ -203,7 +282,8 @@ with st.sidebar:
             "📦 Retours & Remises",
             "📊 Synthèse financière",
             "🤖 Assistant IA",
-            "📄 Rapport de pilotage"
+            "📄 Rapport de pilotage",
+            "📋 Plan d'action"
         ]
         page = st.selectbox("Navigation", pages_ec)
         st.divider()
@@ -460,8 +540,8 @@ elif role == "ec" and page == "👥 Gestion des dossiers":
     st.header("👥 Gestion des dossiers clients")
     cab = st.session_state["cabinet"]
 
-    tab_dossiers, tab_ec_users, tab_import_export = st.tabs([
-        "📁 Dossiers", "👤 Utilisateurs EC", "💾 Import / Export config"
+    tab_dossiers, tab_notifs, tab_ec_users, tab_import_export = st.tabs([
+        "📁 Dossiers", "📨 Notifications", "👤 Utilisateurs EC", "💾 Import / Export config"
     ])
 
     # ── Onglet Dossiers ──
@@ -474,6 +554,8 @@ elif role == "ec" and page == "👥 Gestion des dossiers":
             exercice   = c2.text_input("Exercice", value="2025/2026")
             periode_d  = c2.text_input("Début de période", value="01/04/2025")
             periode_f  = c2.text_input("Fin de période", value="31/03/2026")
+            email_dir_form = c1.text_input("Email du dirigeant (pour notifications)",
+                placeholder="thomas.bernard@editions-argonaute.fr")
             login_dir  = c1.text_input("Login dirigeant (pour accès client)", placeholder="argonaute")
             pw_dir     = c2.text_input("Mot de passe dirigeant", type="password")
             submitted = st.form_submit_button("➕ Créer ce dossier", type="primary")
@@ -490,10 +572,12 @@ elif role == "ec" and page == "👥 Gestion des dossiers":
                         "exercice": exercice,
                         "periode_debut": periode_d,
                         "periode_fin": periode_f,
+                        "email_dirigeant": email_dir_form,
                         "param_comptes": {},
                         "mapping": {},
                         "labels_indirect": {"charges": "CHARGES INDIRECTES", "produits": "PRODUITS INDIRECTS"},
-                        "dirigeant_users": {}
+                        "dirigeant_users": {},
+                        "notifications": []
                     }
                     if login_dir and pw_dir:
                         dossier["dirigeant_users"][login_dir] = {
@@ -573,6 +657,104 @@ elif role == "ec" and page == "👥 Gestion des dossiers":
             if login_u != st.session_state["username"]:
                 if col2.button("Supprimer", key=f"del_ec_{login_u}"):
                     del cab["ec_users"][login_u]
+                    st.rerun()
+
+    # ── Onglet Notifications ──
+    with tab_notifs:
+        st.subheader("Envoyer une notification au dirigeant")
+
+        dossiers_notif = st.session_state["cabinet"]["dossiers"]
+        if not dossiers_notif:
+            st.info("Créez d'abord un dossier client.")
+        else:
+            did_notif = st.selectbox(
+                "Dossier client",
+                options=list(dossiers_notif.keys()),
+                format_func=lambda x: dossiers_notif[x]["nom"],
+                key="notif_dossier_sel"
+            )
+            dos_notif = dossiers_notif[did_notif]
+
+            st.markdown("**Message in-app** *(visible à la connexion du dirigeant)*")
+            with st.form("form_notif"):
+                type_notif = st.selectbox("Type de message", [
+                    "✅ info — Mise à jour disponible",
+                    "⚠️ warning — Point d'attention",
+                    "🔴 error — Action requise"
+                ], key="notif_type")
+                msg_notif = st.text_area("Message",
+                    placeholder="Ex : Votre tableau de bord de juillet est disponible. "
+                                "Votre taux de retour est de 18% — dans la norme sectorielle.",
+                    height=100, key="notif_msg")
+
+                st.divider()
+                st.markdown("**Notification par email** *(optionnel)*")
+                email_dir = st.text_input("Email du dirigeant",
+                    value=dos_notif.get("email_dirigeant",""),
+                    placeholder="thomas.bernard@editions-argonaute.fr",
+                    key="notif_email")
+                envoyer_mail = st.checkbox("Envoyer aussi par email", value=True, key="notif_send_mail")
+
+                submitted_notif = st.form_submit_button("📨 Envoyer la notification", type="primary")
+
+                if submitted_notif:
+                    if not msg_notif.strip():
+                        st.error("Le message ne peut pas être vide.")
+                    else:
+                        # Sauvegarder email si renseigné
+                        if email_dir:
+                            dos_notif["email_dirigeant"] = email_dir
+                            save_dossier(did_notif, dos_notif)
+
+                        # Notification in-app
+                        type_key = "info"
+                        if "warning" in type_notif: type_key = "warning"
+                        elif "error" in type_notif: type_key = "error"
+                        ajouter_notification(did_notif, msg_notif.strip(), type_key)
+                        st.success("✅ Notification in-app enregistrée.")
+
+                        # Email
+                        if envoyer_mail and email_dir:
+                            nom_dos_notif = dos_notif.get("nom","votre maison d'édition")
+                            corps_mail = f"""Bonjour,
+
+Votre expert-comptable vous adresse un message concernant {nom_dos_notif} :
+
+{msg_notif.strip()}
+
+Pour consulter votre tableau de bord, connectez-vous à VISION EDITION :
+{APP_URL}
+
+Cordialement,
+CAB EDITION"""
+                            ok, msg_ret = envoyer_email(
+                                email_dir,
+                                f"Mise à jour — {nom_dos_notif}",
+                                corps_mail
+                            )
+                            if ok:
+                                st.success(f"✅ Email envoyé à {email_dir}")
+                            else:
+                                st.warning(f"⚠️ Notification in-app OK mais email non envoyé : {msg_ret}")
+                        elif envoyer_mail and not email_dir:
+                            st.warning("⚠️ Aucun email renseigné — notification in-app uniquement.")
+
+            # Historique notifications
+            st.divider()
+            st.subheader("Historique des notifications")
+            dos_hist = get_dossier(did_notif)
+            notifs_hist = dos_hist.get("notifications", [])
+            if not notifs_hist:
+                st.info("Aucune notification envoyée pour ce dossier.")
+            else:
+                for i, n in enumerate(reversed(notifs_hist)):
+                    statut = "🔵 Non lu" if not n["lu"] else "✅ Lu"
+                    with st.expander(f"{statut} — {n['date']} — {n['message'][:50]}..."):
+                        st.write(f"**Message :** {n['message']}")
+                        st.write(f"**Type :** {n['type']} | **Statut :** {statut}")
+                if st.button("🗑️ Effacer l'historique", key="clear_notifs"):
+                    dos_hist["notifications"] = []
+                    save_dossier(did_notif, dos_hist)
                     st.rerun()
 
     # ── Onglet Import/Export config ──
@@ -746,21 +928,46 @@ elif role == "ec" and page == "⚙️ Paramétrage analytique":
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Mapping des colonnes")
+        st.subheader("Mapping des colonnes de base")
         compte_col  = st.selectbox("Colonne Compte", columns, key="map_compte_col")
         debit_col   = st.selectbox("Colonne Débit", columns, key="map_debit_col")
         credit_col  = st.selectbox("Colonne Crédit", columns, key="map_credit_col")
         date_col    = st.selectbox("Colonne Date", columns, key="map_date_col")
         libelle_col = st.selectbox("Libellé (optionnel)", [""]+columns, key="map_libelle_col")
-        journal_col = st.selectbox("Code journal (optionnel)", [""]+columns, key="map_journal_col")
+        journal_col = st.selectbox("Code journal (optionnel)", [""]+columns, key="map_journal_col",
+            help="Recommandé pour le module Trésorerie : permet d'exclure les écritures AN.")
     with col2:
         st.subheader("Comptes comptables")
         ventes_comptes  = st.text_input("Comptes ventes (CA large)", value=",".join(saved_params.get("ventes",["701"])), key="map_ventes_comptes")
-        ventes_dist     = st.text_input("Comptes ventes distributeur", value=",".join(saved_params.get("ventes_distributeur",["7011"])), key="map_ventes_distributeur_comptes")
+        ventes_dist     = st.text_input("Comptes ventes distributeur (base taux retour/remise)", value=",".join(saved_params.get("ventes_distributeur",["7011"])), key="map_ventes_distributeur_comptes",
+            help="Sous-compte strict du diffuseur (ex: 7011 pour BLDD). Base exclusive du taux de retour/remise.")
         retours_comptes = st.text_input("Comptes retours", value=",".join(saved_params.get("retours",["709"])), key="map_retours_comptes")
         remises_comptes = st.text_input("Comptes remises", value=",".join(saved_params.get("remises",["7091"])), key="map_remises_comptes")
         charges_comptes = st.text_input("Comptes charges", value=",".join(saved_params.get("charges",["6"])), key="map_charges_comptes")
-        prov_comptes    = st.text_input("Comptes reprises provisions", value=",".join(saved_params.get("provisions_reprises",["781"])), key="map_provisions_reprises_comptes")
+        prov_comptes    = st.text_input("Comptes reprises sur provisions (ex. retour)", value=",".join(saved_params.get("provisions_reprises",["781"])), key="map_provisions_reprises_comptes",
+            help="Reprises sur provisions (ex. 781) — nettées contre les charges, pas comptées en CA.")
+        charges_imputees = st.radio("Charges déjà imputées par section ?", ["Oui","Non"], key="map_charges_imputees")
+
+    # ── Détail des charges par nature (mini SIG) ──
+    with st.expander("📐 Détail des charges par nature (optionnel — mini SIG détaillé par titre)"):
+        st.caption(
+            "Renseignez ici les comptes correspondant à chaque nature de charge directe. "
+            "Si cette section reste vide, la fiche titre affiche une seule ligne agrégée "
+            "« Charges variables ». Dès qu'au moins une nature est renseignée, la fiche titre "
+            "affiche un compte de résultat en cascade détaillé par nature de charge."
+        )
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            cpt_stock   = st.text_input("Variation de stock", value=saved_params.get("detail_charges",{}).get("Variation de stock",[""])[0] if saved_params.get("detail_charges") else "", key="cpt_variation_stock", help="Ex. 603")
+            cpt_droits  = st.text_input("Droits d'auteur", value="", key="cpt_droits_auteur_detail", help="Ex. 604300000")
+            cpt_comm    = st.text_input("Commercialisation", value="", key="cpt_commercialisation", help="Ex. 645106,6228")
+            cpt_struct  = st.text_input("Structure / gérant", value="", key="cpt_structure", help="Ex. 6411,6451")
+        with col_d2:
+            cpt_prov_d  = st.text_input("Provision pour retour (dotation)", value="", key="cpt_dotations", help="Ex. 6810")
+            cpt_contenu = st.text_input("Contenu (préparation éditoriale, prépresse)", value="", key="cpt_contenu")
+            cpt_fab     = st.text_input("Fabrication (impression, façonnage)", value="", key="cpt_fabrication", help="Ex. 605")
+            cpt_mixte   = st.text_input("Compte mixte contenu/fabrication (scindé par mot-clé)", value="", key="cpt_mixte_contenu_fab", help="Ex. 604 — scindé automatiquement par mot-clé dans le libellé")
+            cpt_mots_cles = st.text_input("Mots-clés fabrication", value="REPROGRAPHIE,IMPRIM,PRINT,FACONNAGE", key="cpt_mots_cles_fab")
 
     st.subheader("Familles analytiques")
     nb_familles = st.number_input("Nombre de familles", min_value=1, max_value=4, value=1, step=1, key="map_nb_familles")
@@ -801,6 +1008,20 @@ elif role == "ec" and page == "⚙️ Paramétrage analytique":
         df["Compte"] = df["Compte"].astype(str).str.strip()
 
         def sc(s): return [c.strip() for c in s.split(",") if c.strip()]
+
+        detail_charges = {
+            "Variation de stock":    sc(st.session_state.get("cpt_variation_stock","")),
+            "Droits d'auteur":       sc(st.session_state.get("cpt_droits_auteur_detail","")),
+            "Commercialisation":     sc(st.session_state.get("cpt_commercialisation","")),
+            "Structure/gérant":      sc(st.session_state.get("cpt_structure","")),
+            "Provision pour retour": sc(st.session_state.get("cpt_dotations","")),
+            "Contenu":               sc(st.session_state.get("cpt_contenu","")),
+            "Fabrication":           sc(st.session_state.get("cpt_fabrication","")),
+        }
+        mixte_comptes  = sc(st.session_state.get("cpt_mixte_contenu_fab",""))
+        mots_cles_fab_ = sc(st.session_state.get("cpt_mots_cles_fab","REPROGRAPHIE,IMPRIM,PRINT,FACONNAGE"))
+        detail_actif   = any(v for v in detail_charges.values()) or bool(mixte_comptes)
+
         params = {
             "ventes":  sc(ventes_comptes),
             "ventes_distributeur": sc(ventes_dist) or sc(ventes_comptes),
@@ -808,7 +1029,10 @@ elif role == "ec" and page == "⚙️ Paramétrage analytique":
             "remises": sc(remises_comptes),
             "charges": sc(charges_comptes),
             "provisions_reprises": sc(prov_comptes),
-            "charges_imputees": "Oui",
+            "charges_imputees": st.session_state.get("map_charges_imputees","Oui"),
+            "detail_charges": detail_charges if detail_actif else None,
+            "contenu_fabrication_mixte": {"comptes": mixte_comptes, "mots_cles_fabrication": mots_cles_fab_} if mixte_comptes else None,
+            "stock": sc(st.session_state.get("cpt_variation_stock","")) or ["603"],
         }
 
         group_cols = ["Compte"]+familles_cols+codes_cols+["Date"]
@@ -927,70 +1151,207 @@ elif role == "ec" and page == "📖 Analyse par titre":
     df, params = check_pivot()
     dos = get_dossier(st.session_state["dossier_id"])
     st.header(f"📖 Analyse par titre — {dos['nom']}")
+    if st.session_state.get("repartition_active"):
+        st.caption("ℹ️ Les charges/produits indirects ont été répartis sur les titres actifs.")
 
     titres = sorted(filtrer_isbn_reels(df)["Code_Analytique"].astype(str).unique().tolist())
     if not titres:
-        st.warning("Aucun ISBN détecté.")
+        st.warning("Aucun ISBN/code analytique détecté.")
         st.stop()
 
     indic = calculer_indicateurs_titres(df, params, titres)
+
+    # ── Repères rapides ──
+    st.subheader("🧭 Repères rapides")
     col_s, col_t, col_f = st.columns(3)
 
-    def _liste(container, sous_titre, df_tri, col_montant):
+    def _liste_titres(container, sous_titre, df_tri, col_montant):
         container.markdown(f"**{sous_titre}**")
         for _, row in df_tri.iterrows():
             container.write(f"{row['Signal']} **{label_affiche(row['Code_Analytique'],df)}** — {fmt_fr(row[col_montant])} €")
 
-    _liste(col_s, "📊 Plus significatifs", indic.sort_values("Ventes HT",ascending=False).head(5), "Ventes HT")
-    _liste(col_t, "🏆 Plus rentables", indic.sort_values("Résultat net",ascending=False).head(5), "Résultat net")
-    _liste(col_f, "⚠️ Plus difficiles", indic.sort_values("Résultat net",ascending=True).head(5), "Résultat net")
+    _liste_titres(col_s, "📊 Plus significatifs (CA brut)", indic.sort_values("Ventes HT",ascending=False).head(5), "Ventes HT")
+    _liste_titres(col_t, "🏆 Plus rentables (résultat net)", indic.sort_values("Résultat net",ascending=False).head(5), "Résultat net")
+    _liste_titres(col_f, "⚠️ Plus difficiles (résultat net)", indic.sort_values("Résultat net",ascending=True).head(5), "Résultat net")
 
     st.divider()
-    isbn_sel = st.selectbox("Sélectionner un titre", titres, format_func=lambda c: label_affiche(c,df))
-    df_t = df[df["Code_Analytique"] == isbn_sel]
-    df_v_ = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params["ventes"]))]
-    df_r_ = df_t[mask_retours(df_t, params)]
-    df_rem_ = df_t[mask_remises(df_t, params)]
-    pstock = tuple(params.get("stock") or ["603"])
-    df_c_ = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params["charges"]))
-                  & (~df_t["Compte"].astype(str).str.startswith(pstock))]
-    df_cfi = df_t[df_t["Compte"].astype(str) == COMPTE_CHARGES_INDIRECTES_REPARTIES]
+    isbn_sel = st.selectbox("Sélectionner un titre pour la fiche détaillée",
+                            titres, format_func=lambda c: label_affiche(c,df))
 
-    ventes_ht = df_v_["Crédit"].sum()
-    retours_m = df_r_["Débit"].sum() - df_r_["Crédit"].sum()
-    remises_m = df_rem_["Débit"].sum() - df_rem_["Crédit"].sum()
-    ca_net_t  = ventes_ht - retours_m - remises_m
-    charges_v = df_c_["Débit"].sum() - df_c_["Crédit"].sum()
-    marge_b   = ca_net_t - charges_v
-    cf        = df_cfi["Débit"].sum()
-    res_net   = marge_b - cf
+    # ── Calculs fiche titre ──
+    df_t    = df[df["Code_Analytique"] == isbn_sel]
+    df_v_   = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params["ventes"]))]
+    df_vd_  = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params.get("ventes_distributeur") or params["ventes"]))]
+    df_r_   = df_t[mask_retours(df_t, params)]
+    df_rem_ = df_t[mask_remises(df_t, params)]
+    pstock  = tuple(params.get("stock") or ["603"])
+    df_c_   = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params["charges"]))
+                   & (~df_t["Compte"].astype(str).str.startswith(pstock))]
+    df_stock_ = df_t[df_t["Compte"].astype(str).str.startswith(pstock)]
+    df_cfi    = df_t[df_t["Compte"].astype(str) == COMPTE_CHARGES_INDIRECTES_REPARTIES]
+
+    pref_prov = tuple(params.get("provisions_reprises") or [])
+    df_prov_t = df_t[df_t["Compte"].astype(str).str.startswith(pref_prov)] if pref_prov else df_t.iloc[0:0]
+    net_prov_t = df_prov_t["Crédit"].sum() - df_prov_t["Débit"].sum()
+
+    ventes_ht   = df_v_["Crédit"].sum()
+    ventes_dist = df_vd_["Crédit"].sum()
+    retours_m   = df_r_["Débit"].sum() - df_r_["Crédit"].sum()
+    remises_m   = df_rem_["Débit"].sum() - df_rem_["Crédit"].sum()
+    ca_net_t    = ventes_ht - retours_m - remises_m
+    charges_v   = (df_c_["Débit"].sum() - df_c_["Crédit"].sum()) - net_prov_t
+    var_stock   = df_stock_["Débit"].sum() - df_stock_["Crédit"].sum()
+    marge_b     = ca_net_t - charges_v
+    cf          = df_cfi["Débit"].sum()
+    res_net     = marge_b - var_stock - cf
+    taux_ret_t  = (retours_m / ventes_dist * 100) if ventes_dist else 0
+    taux_rem_t  = (remises_m / ventes_dist * 100) if ventes_dist else 0
+
+    # Signal
+    if res_net > 0 and taux_ret_t < 20:
+        signal_t, bg_t, fg_t = "🟢 Titre rentable", "#d1fae5", "#065f46"
+    elif res_net > 0 and taux_ret_t < 35:
+        signal_t, bg_t, fg_t = "🟡 Rentabilité à surveiller", "#fef3c7", "#92400e"
+    else:
+        signal_t, bg_t, fg_t = "🔴 Titre en difficulté", "#fee2e2", "#991b1b"
+
+    st.markdown(f"""<div style='padding:14px 18px;border-radius:12px;background:{bg_t};
+        color:{fg_t};font-weight:600;font-size:16px;margin-bottom:14px'>
+        {label_affiche(isbn_sel,df)} — {signal_t}</div>""", unsafe_allow_html=True)
 
     k1,k2,k3,k4 = st.columns(4)
-    k1.metric("CA net", f"{fmt_fr(ca_net_t)} €")
-    k2.metric("Marge brute", f"{fmt_fr(marge_b)} €")
-    k3.metric("Charges fixes imputées", f"{fmt_fr(cf)} €")
+    k1.metric("Taux de retour", f"{taux_ret_t:.1f} %")
+    k2.metric("Taux de remise", f"{taux_rem_t:.1f} %")
+    k3.metric("Marge brute", f"{fmt_fr(marge_b)} €")
     k4.metric("Résultat net", f"{fmt_fr(res_net)} €")
 
-    rows_sig = [
-        ("Ventes HT", ventes_ht, "base"),
-        ("− Retours", -retours_m, "deduction"),
-        ("− Remises", -remises_m, "deduction"),
-        ("= CA net", ca_net_t, "subtotal"),
-        ("− Charges variables", -charges_v, "deduction"),
-        ("= Marge brute", marge_b, "subtotal"),
-        ("− Charges fixes imputées", -cf, "deduction"),
-        ("= Résultat net", res_net, "total"),
-    ]
-    measures = [{"base":"absolute","deduction":"relative","subtotal":"total","total":"total"}[r[2]] for r in rows_sig]
-    fig3 = go.Figure(go.Waterfall(
-        orientation="v", measure=measures,
+    if cf == 0 and not st.session_state.get("repartition_active"):
+        st.caption("ℹ️ Aucune charge fixe imputée : la répartition des charges indirectes n'a pas été activée.")
+    if abs(var_stock) > 0.5:
+        st.caption(f"ℹ️ Variation de stock : {fmt_fr(var_stock)} € — isolée de la marge brute, incluse dans le résultat net.")
+
+    # ── Mini SIG ──
+    st.markdown("#### Mini SIG — Soldes intermédiaires de gestion")
+
+    detail_charges = params.get("detail_charges")
+    mixte          = params.get("contenu_fabrication_mixte") or {}
+    mixte_comptes  = tuple(mixte.get("comptes") or [])
+    mots_cles_fab  = [m.strip().upper() for m in (mixte.get("mots_cles_fabrication") or []) if m.strip()]
+
+    charge_rows = []
+    if detail_charges:
+        total_detail = 0.0
+        comptes_couverts = []
+        for nom_nat, prefixes in detail_charges.items():
+            if prefixes and any(str(p)==str(sp) or str(p).startswith(str(sp)) or str(sp).startswith(str(p))
+                                for p in prefixes for sp in list(pstock)):
+                continue
+            pref_eff = (list(prefixes) + list(params.get("provisions_reprises") or [])
+                        if nom_nat == "Provision pour retour" else list(prefixes))
+            df_nat_pref = df_t[df_t["Compte"].astype(str).str.startswith(tuple(pref_eff))] if pref_eff else df_t.iloc[0:0]
+            df_nat_mixte = df_t.iloc[0:0]
+            if nom_nat in ("Contenu","Fabrication") and mixte_comptes:
+                df_mx = df_t[df_t["Compte"].astype(str).str.startswith(mixte_comptes)]
+                if not df_mx.empty and mots_cles_fab:
+                    lib_up = df_mx["Libellé"].astype(str).str.upper()
+                    mask_fab = lib_up.str.contains("|".join(mots_cles_fab), regex=True)
+                else:
+                    mask_fab = pd.Series(False, index=df_mx.index)
+                df_nat_mixte = df_mx[mask_fab] if nom_nat=="Fabrication" else df_mx[~mask_fab]
+                comptes_couverts.extend(list(mixte_comptes))
+            if pref_eff or (nom_nat in ("Contenu","Fabrication") and mixte_comptes):
+                df_nat = pd.concat([df_nat_pref, df_nat_mixte]) if not df_nat_mixte.empty else df_nat_pref
+                val    = df_nat["Débit"].sum() - df_nat["Crédit"].sum()
+                comptes_couverts.extend(pref_eff)
+            else:
+                val = 0.0
+            charge_rows.append((f"− {nom_nat}", -val, "deduction"))
+            total_detail += val
+        reste = charges_v - total_detail
+        if abs(reste) > 0.5:
+            charge_rows.append(("− Autres charges directes", -reste, "deduction"))
+    else:
+        charge_rows = [("− Charges variables", -charges_v, "deduction")]
+
+    rows_sig = (
+        [("Ventes HT", ventes_ht, "base"),
+         ("− Retours", -retours_m, "deduction"),
+         ("− Remises", -remises_m, "deduction"),
+         ("= CA net",  ca_net_t,  "subtotal")]
+        + charge_rows
+        + [("= Marge brute", marge_b, "subtotal")]
+        + ([("− Variation de stock", -var_stock, "deduction")] if abs(var_stock) > 0.5 else [])
+        + [("− Charges fixes imputées", -cf, "deduction"),
+           ("= Résultat net du titre", res_net, "total")]
+    )
+
+    # Tableau HTML
+    html_rows = ""
+    for libelle_sig, montant_sig, style_sig in rows_sig:
+        if style_sig == "subtotal":
+            row_style = "background:#eef2ff;font-weight:600;"
+        elif style_sig == "total":
+            col_ = "#065f46" if montant_sig >= 0 else "#991b1b"
+            fill_ = "#d1fae5" if montant_sig >= 0 else "#fee2e2"
+            row_style = f"background:{fill_};font-weight:700;color:{col_};"
+        elif style_sig == "deduction":
+            row_style = "color:#b91c1c;"
+        else:
+            row_style = "font-weight:500;"
+        html_rows += (f"<tr style='{row_style}'>"
+                      f"<td style='padding:7px 12px;border-bottom:1px solid #eee'>{libelle_sig}</td>"
+                      f"<td style='padding:7px 12px;border-bottom:1px solid #eee;text-align:right'>"
+                      f"{fmt_fr(montant_sig)} €</td></tr>")
+    st.markdown(f"""<table style='width:100%;border-collapse:collapse;font-size:14px;
+        border-radius:8px;overflow:hidden'>{html_rows}</table>""", unsafe_allow_html=True)
+
+    # Waterfall
+    _style_mesure = {"base":"absolute","deduction":"relative","subtotal":"total","total":"total"}
+    measures_sig  = [_style_mesure[r[2]] for r in rows_sig]
+    fig_sig = go.Figure(go.Waterfall(
+        orientation="v", measure=measures_sig,
         x=[r[0] for r in rows_sig], y=[r[1] for r in rows_sig],
+        text=[f"{fmt_fr(r[1])} €" for r in rows_sig],
+        textposition="outside",
+        connector={"line":{"color":"gray","width":0.5}},
         decreasing={"marker":{"color":"#EF4444"}},
         increasing={"marker":{"color":"#10B981"}},
         totals={"marker":{"color":"#3B82F6"}}
     ))
-    fig3.update_layout(height=300, margin=dict(t=10))
-    st.plotly_chart(fig3, use_container_width=True)
+    nb_natures = len(rows_sig)
+    fig_sig.update_layout(
+        height=300 + nb_natures * 15,
+        margin=dict(t=10), yaxis_title="€",
+        xaxis_tickangle=-30 if nb_natures > 6 else 0
+    )
+    st.plotly_chart(fig_sig, use_container_width=True)
+
+    # Évolution mensuelle
+    df_t_evol = df_t.copy()
+    df_t_evol["Date"] = pd.to_datetime(df_t_evol["Date"], errors="coerce")
+    df_t_evol["Mois"] = df_t_evol["Date"].dt.to_period("M").astype(str)
+    evol_v = df_t_evol[df_t_evol["Compte"].astype(str).str.startswith(tuple(params["ventes"]))].groupby("Mois")["Crédit"].sum().reset_index()
+    evol_r = df_t_evol[mask_retours(df_t_evol,params)].groupby("Mois")["Débit"].sum().reset_index()
+    evol = evol_v.merge(evol_r, on="Mois", how="left").fillna(0)
+    evol.columns = ["Mois","Ventes","Retours"]
+    if not evol.empty:
+        st.markdown("#### Évolution mensuelle")
+        fig_evol = px.line(evol, x="Mois", y=["Ventes","Retours"], markers=True, height=260)
+        fig_evol.update_layout(margin=dict(t=10), legend_title="")
+        st.plotly_chart(fig_evol, use_container_width=True)
+
+    # Export Excel fiche titre
+    buf_ft = BytesIO()
+    df_cr_ft = pd.DataFrame({"Poste":[r[0] for r in rows_sig],"Montant (€)":[r[1] for r in rows_sig]})
+    with pd.ExcelWriter(buf_ft, engine="openpyxl") as writer:
+        df_cr_ft.to_excel(writer, index=False, sheet_name="Compte_Resultat")
+        if not evol.empty:
+            evol.to_excel(writer, index=False, sheet_name="Evolution_mensuelle")
+    buf_ft.seek(0)
+    st.download_button("📥 Exporter la fiche titre (Excel)", buf_ft,
+        file_name=f"Fiche_titre_{isbn_sel.replace('/','-')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"export_fiche_{isbn_sel}")
 
 # ── SIMULATEUR ──
 elif role == "ec" and page == "🎯 Simulateur de rentabilité":
@@ -1048,6 +1409,698 @@ elif role == "ec" and page == "🎯 Simulateur de rentabilité":
             st.success(f"✅ Seuil de rentabilité : taux de retour max **{seuil:.1f}%** (marge de {marge_s:.1f} pts)")
         else:
             st.error(f"❌ Déficitaire — seuil d'équilibre à **{seuil:.1f}%** (vs {tr_hyp:.1f}% simulé)")
+
+
+# ── TRÉSORERIE (EC) ──
+elif role == "ec" and page == "💰 Trésorerie prévisionnelle":
+    df, params = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header(f"💰 Trésorerie prévisionnelle — {dos['nom']}")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Débit"] = pd.to_numeric(df["Débit"], errors="coerce").fillna(0)
+    df["Crédit"] = pd.to_numeric(df["Crédit"], errors="coerce").fillna(0)
+    if "Journal" not in df.columns: df["Journal"] = ""
+    df = df.dropna(subset=["Date"])
+    if df.empty:
+        st.warning("Aucune écriture datée.")
+        st.stop()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        date_debut = st.date_input("Date de départ", df["Date"].min())
+        tresorerie_ouv = st.number_input("Trésorerie à l'ouverture (€)", value=0.0, step=100.0)
+    with col2:
+        horizon = st.slider("Horizon projection (mois)", 0, 24, 6)
+        comptes_banque = tuple(x.strip() for x in st.text_input("Comptes trésorerie","512,530,580").split(",") if x.strip())
+        journaux_exclus = tuple(x.strip() for x in st.text_input("Journaux exclus (AN)","AN").split(",") if x.strip())
+
+    mask_an = df["Journal"].isin(journaux_exclus) if journaux_exclus else pd.Series(False, index=df.index)
+    df_flux = df[~mask_an & (df["Date"]>=pd.to_datetime(date_debut))].copy()
+    df_flux["Mois"] = df_flux["Date"].dt.to_period("M")
+
+    if df_flux.empty:
+        st.warning("Aucune écriture après la date de départ.")
+        st.stop()
+
+    mois = sorted(df_flux["Mois"].unique())
+    encaissements = df_flux[df_flux["Compte"].astype(str).str.startswith("41")].groupby("Mois")["Crédit"].sum()
+    decaissements = df_flux[df_flux["Compte"].astype(str).str.startswith(("40","42","43","44"))].groupby("Mois")["Débit"].sum()
+    flux_net = encaissements.sub(decaissements, fill_value=0).reindex(mois, fill_value=0)
+    treso = tresorerie_ouv + flux_net.cumsum()
+
+    st.session_state["treso_real"] = treso
+    st.session_state["treso_ouverture"] = tresorerie_ouv
+
+    m1,m2,m3 = st.columns(3)
+    m1.metric("Trésorerie ouverture", f"{fmt_fr(tresorerie_ouv)} €")
+    m2.metric("Trésorerie clôture (réalisé)", f"{fmt_fr(treso.iloc[-1])} €")
+    m3.metric("Flux net généré", f"{fmt_fr(flux_net.sum())} €")
+
+    _MOIS_FR = {1:"Jan",2:"Fév",3:"Mar",4:"Avr",5:"Mai",6:"Jui",7:"Jul",8:"Aoû",9:"Sep",10:"Oct",11:"Nov",12:"Déc"}
+    def ml(p): return f"{_MOIS_FR.get(p.month,str(p.month))} {p.year}"
+
+    fig_t = go.Figure()
+    fig_t.add_trace(go.Scatter(x=[ml(m) for m in treso.index], y=treso.values,
+                               name="Réalisé", line=dict(color="#111827",width=2.5)))
+
+    if horizon > 0:
+        base_enc = encaissements.iloc[-3:].mean() if len(encaissements)>=3 else (encaissements.mean() if len(encaissements) else 0)
+        base_dec = decaissements.iloc[-3:].mean() if len(decaissements)>=3 else (decaissements.mean() if len(decaissements) else 0)
+        col_sc1,col_sc2,col_sc3,col_sc4 = st.columns(4)
+        t_opt  = col_sc1.number_input("Croissance encaissements optimiste (%/mois)", value=4.0, step=0.5)/100
+        t_cent = col_sc2.number_input("Croissance encaissements central (%/mois)", value=2.0, step=0.5)/100
+        t_pess = col_sc3.number_input("Croissance encaissements pessimiste (%/mois)", value=0.0, step=0.5)/100
+        t_ch   = col_sc4.number_input("Évolution charges (%/mois)", value=1.0, step=0.5)/100
+        for nom, tc, col_hex in [("Optimiste",t_opt,"#10B981"),("Central",t_cent,"#3B82F6"),("Pessimiste",t_pess,"#EF4444")]:
+            futurs = [mois[-1]+i for i in range(1,horizon+1)]
+            enc_f = base_enc; dec_f = base_dec; proj = []
+            for m_f in futurs:
+                enc_f *= (1+tc); dec_f *= (1+t_ch); proj.append(enc_f-dec_f)
+            treso_proj = treso.iloc[-1] + pd.Series(proj, index=futurs).cumsum()
+            treso_full = pd.concat([treso.iloc[[-1]], treso_proj])
+            fig_t.add_trace(go.Scatter(x=[ml(m) for m in treso_full.index], y=treso_full.values,
+                                       name=nom, line=dict(color=col_hex,width=2,dash="dot")))
+
+    fig_t.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig_t.update_layout(height=380, margin=dict(t=20), xaxis_title="", yaxis_title="€",
+                        legend=dict(orientation="h"))
+    st.plotly_chart(fig_t, use_container_width=True)
+
+# ── DROITS D'AUTEURS (EC) ──
+elif role == "ec" and page == "✍️ Droits d'auteurs":
+    df, params = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header(f"✍️ Droits d'auteurs — {dos['nom']}")
+    st.info("Module complet disponible — configurez les comptes ci-dessous.")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    col1,col2 = st.columns(2)
+    with col1:
+        date_debut_d = st.date_input("Période du", df["Date"].dropna().min().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_d")
+        compte_db = st.text_input("Droits bruts (charge)", value="604300000")
+        compte_urs = st.text_input("URSSAF à payer", value="438106")
+    with col2:
+        date_fin_d = st.date_input("Au", df["Date"].dropna().max().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_f")
+        compte_diff = st.text_input("Contribution diffuseur", value="645106")
+        compte_net  = st.text_input("Droits à payer (net)", value="408106")
+
+    mask_p = (df["Date"]>=pd.to_datetime(date_debut_d)) & (df["Date"]<=pd.to_datetime(date_fin_d))
+    df_p = df[mask_p]
+
+    def par_isbn(cpt, sens):
+        m = df_p["Compte"].astype(str).str.strip()==str(cpt).strip()
+        if not m.any(): return pd.Series(dtype=float)
+        g = df_p[m].groupby("Code_Analytique")
+        return (g["Débit"].sum()-g["Crédit"].sum()) if sens=="debit" else (g["Crédit"].sum()-g["Débit"].sum())
+
+    db_s = par_isbn(compte_db,"debit"); urs_s = par_isbn(compte_urs,"credit")
+    diff_s = par_isbn(compte_diff,"debit"); net_s = par_isbn(compte_net,"credit")
+    av_s = par_isbn("409600","debit")
+
+    isbns_d = sorted(set(db_s.index)|set(urs_s.index)|set(diff_s.index)|set(net_s.index))
+    isbns_d = [i for i in isbns_d if str(i).strip() not in ("","CHARGES INDIRECTES","PRODUITS INDIRECTS")]
+
+    if not isbns_d:
+        st.info("Aucune écriture trouvée sur ces comptes pour la période.")
+    else:
+        lignes = []
+        for isbn in isbns_d:
+            lignes.append({
+                "ISBN": isbn,
+                "Droits bruts (€)": round(float(db_s.get(isbn,0)),2),
+                "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
+                "Précompte URSSAF (€)": round(float(urs_s.get(isbn,0)),2),
+                "Net dû auteur (€)": round(float(net_s.get(isbn,0)),2),
+                "À-valoir restant (€)": round(float(av_s.get(isbn,0)),2),
+            })
+        df_d = pd.DataFrame(lignes)
+        cols_m = ["Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]
+        st.dataframe(df_d.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m}), use_container_width=True)
+
+        total_db = df_d["Droits bruts (€)"].sum()
+        total_urs = df_d["Précompte URSSAF (€)"].sum()
+        total_diff = df_d["Contribution diffuseur (€)"].sum()
+        total_net = df_d["Net dû auteur (€)"].sum()
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Droits bruts", f"{fmt_fr(total_db,2)} €")
+        c2.metric("Précompte URSSAF", f"{fmt_fr(total_urs,2)} €")
+        c3.metric("Contribution diffuseur", f"{fmt_fr(total_diff,2)} €")
+        c4.metric("Net dû aux auteurs", f"{fmt_fr(total_net,2)} €")
+
+        st.markdown(f"**Total à reverser URSSAF : {fmt_fr(total_urs+total_diff,2)} €**")
+
+        buf_d = BytesIO()
+        with pd.ExcelWriter(buf_d, engine="openpyxl") as writer:
+            df_d.to_excel(writer, index=False, sheet_name="Droits_auteurs")
+        buf_d.seek(0)
+        st.download_button("📥 Exporter (Excel)", buf_d,
+            file_name=f"Droits_auteurs_{date_debut_d}_{date_fin_d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# ── RETOURS & REMISES (EC) ──
+elif role == "ec" and page == "📦 Retours & Remises":
+    df, params = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header(f"📦 Retours & Remises — {dos['nom']}")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Mois"] = df["Date"].dt.strftime("%Y-%m")
+    seuil = st.sidebar.number_input("Seuil alerte (%)", value=25, step=5)
+
+    df_v_  = df[df["Compte"].astype(str).str.startswith(tuple(params["ventes"]))]
+    df_r_  = df[mask_retours(df,params)]
+    df_rem_= df[mask_remises(df,params)]
+    pref_d = tuple(params.get("ventes_distributeur") or params["ventes"])
+    df_vd_ = df[df["Compte"].astype(str).str.startswith(pref_d)]
+
+    tv = df_v_["Crédit"].sum(); vd = df_vd_["Crédit"].sum()
+    tr = abs(df_r_["Débit"].sum()-df_r_["Crédit"].sum()) if not df_r_.empty else 0
+    rem= abs(df_rem_["Débit"].sum()-df_rem_["Crédit"].sum()) if not df_rem_.empty else 0
+    taux_r = (tr/vd*100) if vd else 0; taux_rem_pct = (rem/vd*100) if vd else 0
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("CA brut",f"{fmt_fr(tv)} €")
+    c2.metric("Total retours",f"{fmt_fr(tr)} €")
+    c3.metric("Taux de retour",f"{taux_r:.1f} %",
+              delta="⚠️ Dépasse le seuil" if taux_r>seuil else "✅ Normal",
+              delta_color="inverse" if taux_r>seuil else "normal")
+    c4.metric("Taux de remise",f"{taux_rem_pct:.1f} %")
+
+    if taux_r > seuil:
+        st.error(f"🚨 Taux de retour ({taux_r:.1f}%) dépasse votre seuil de {seuil}% !")
+
+    if not df_r_.empty:
+        trend_r = df_r_.groupby("Mois")["Débit"].sum().abs().reset_index()
+        fig_r = px.bar(trend_r, x="Mois", y="Débit", title="Retours mensuels (€)",
+                       color_discrete_sequence=["#EF4444"], height=300)
+        st.plotly_chart(fig_r, use_container_width=True)
+
+        df_ri = filtrer_isbn_reels(df_r_)
+        if not df_ri.empty:
+            ret_isbn = df_ri.groupby("Code_Analytique")["Débit"].sum().abs().reset_index().sort_values("Débit",ascending=False)
+            st.subheader("Retours par titre")
+            st.dataframe(ret_isbn, hide_index=True)
+
+# ── SYNTHÈSE FINANCIÈRE (EC) ──
+elif role == "ec" and page == "📊 Synthèse financière":
+    df, params = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header(f"📊 Synthèse financière — {dos['nom']}")
+
+    df_v_   = df[mask_ventes(df,params)]
+    df_r_   = df[mask_retours(df,params)]
+    df_rem_ = df[mask_remises(df,params)]
+    df_c_   = df[mask_charges(df,params)]
+    df_prov = df[mask_provisions_reprises(df,params)]
+    net_p   = df_prov["Crédit"].sum()-df_prov["Débit"].sum()
+
+    ca_b  = df_v_["Crédit"].sum(); corr = df_v_["Débit"].sum()
+    tr_   = df_r_["Débit"].sum()-df_r_["Crédit"].sum()
+    rem_  = df_rem_["Débit"].sum()-df_rem_["Crédit"].sum()
+    ca_n  = ca_b-tr_-rem_-corr
+    ch_t  = (df_c_["Débit"].sum()-df_c_["Crédit"].sum())-net_p
+    res_  = ca_n-ch_t
+    mb_p  = (res_/ca_b*100) if ca_b else 0
+
+    soldes   = [ca_b,-tr_,-rem_,-corr,ca_n,-ch_t,res_]
+    libelles = ["CA brut","Retours","Remises","Corrections","CA net","Charges","Résultat net"]
+
+    col1,col2 = st.columns([1.2,1])
+    with col1:
+        st.subheader("Compte de résultat synthétique")
+        df_sum = pd.DataFrame({"Poste":libelles,"Montant (€)":soldes})
+        st.dataframe(df_sum.style.format({"Montant (€)":(lambda x: fmt_fr(x))}), hide_index=True)
+        st.metric("Taux de marge nette",f"{mb_p:.1f} %")
+    with col2:
+        fig_w = go.Figure(go.Waterfall(
+            orientation="v",
+            measure=["absolute","relative","relative","relative","total","relative","total"],
+            x=libelles, y=soldes,
+            decreasing={"marker":{"color":"#EF4444"}},
+            increasing={"marker":{"color":"#10B981"}},
+            totals={"marker":{"color":"#3B82F6"}}
+        ))
+        fig_w.update_layout(height=360, margin=dict(t=20))
+        st.plotly_chart(fig_w, use_container_width=True)
+
+    buf_s = BytesIO()
+    with pd.ExcelWriter(buf_s, engine="openpyxl") as writer:
+        df_sum.to_excel(writer, index=False, sheet_name="Synthese")
+    buf_s.seek(0)
+    st.download_button("📥 Exporter la synthèse (Excel)", buf_s,
+        file_name="Synthese_Financiere.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# ── ASSISTANT IA (EC) ──
+elif role == "ec" and page == "🤖 Assistant IA":
+    df_ia, params_ia = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header(f"🤖 Assistant IA — {dos['nom']}")
+    client_ai = get_client_ai()
+    if client_ai is None:
+        st.error("⚠️ Clé API Anthropic non configurée (ANTHROPIC_API_KEY dans les secrets Streamlit).")
+        st.stop()
+
+    # Contexte données
+    df_v_ = df_ia[mask_ventes(df_ia,params_ia)]
+    df_r_ = df_ia[mask_retours(df_ia,params_ia)]
+    ca_b_ = df_v_["Crédit"].sum(); tr_ = df_r_["Débit"].sum()-df_r_["Crédit"].sum()
+    ca_n_ = ca_b_ - tr_
+    taux_r_ = (tr_/ca_b_*100) if ca_b_ else 0
+    nb_isbn_ = filtrer_isbn_reels(df_ia)["Code_Analytique"].nunique()
+
+    data_ctx = f"""
+DONNÉES ANALYTIQUES — {dos['nom']} — {dos.get('exercice','')}
+CA brut : {fmt_fr(ca_b_)} EUR
+Total retours : {fmt_fr(tr_)} EUR
+CA net : {fmt_fr(ca_n_)} EUR
+Taux de retour : {taux_r_:.1f} %
+Nombre de titres actifs : {nb_isbn_}
+"""
+    sys_prompt = SYSTEM_PROMPT_EC + f"\n\nDONNÉES DU DOSSIER :\n{data_ctx}"
+
+    for msg in st.session_state["messages_agent"]:
+        with st.chat_message(msg["role"], avatar="🧑" if msg["role"]=="user" else "🤖"):
+            st.markdown(msg["content"])
+
+    if prompt_u := st.chat_input("Posez votre question..."):
+        st.session_state["messages_agent"].append({"role":"user","content":prompt_u})
+        with st.chat_message("user", avatar="🧑"):
+            st.markdown(prompt_u)
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Analyse en cours..."):
+                resp = client_ai.messages.create(
+                    model="claude-sonnet-4-6", max_tokens=800,
+                    system=sys_prompt, messages=st.session_state["messages_agent"]
+                )
+                answer = resp.content[0].text
+                st.markdown(answer)
+                st.session_state["messages_agent"].append({"role":"assistant","content":answer})
+
+    if st.button("🗑️ Effacer"):
+        st.session_state["messages_agent"] = []
+        st.rerun()
+
+# ── RAPPORT DE PILOTAGE (EC) ──
+elif role == "ec" and page == "📄 Rapport de pilotage":
+    df, params = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header("📄 Rapport de pilotage analytique")
+    st.markdown(f"*{dos['nom']} — {dos.get('exercice','')}*")
+
+    if not DOCX_AVAILABLE:
+        st.error("❌ python-docx non installé. Ajoutez `python-docx` dans requirements.txt.")
+        st.stop()
+
+    col1,col2 = st.columns(2)
+    with col1:
+        nom_editeur = st.text_input("Maison d'édition", value=dos.get("nom",""))
+        nom_dirigeant = st.text_input("Nom du dirigeant", value=dos.get("dirigeant",""))
+        exercice = st.text_input("Exercice", value=dos.get("exercice","2025/2026"))
+    with col2:
+        date_rapport = st.date_input("Date du rapport", value=_dt.date.today())
+        periode_debut = st.text_input("Début de période", value=dos.get("periode_debut","01/04/2025"))
+        periode_fin   = st.text_input("Fin de période",   value=dos.get("periode_fin","31/03/2026"))
+
+    mode_anon = st.checkbox("🕶️ Anonymiser les titres", value=False)
+    nb_top = st.slider("Nombre de titres Top / Flop", 3, 10, 5)
+
+    titres_r = sorted(filtrer_isbn_reels(df)["Code_Analytique"].astype(str).unique().tolist())
+    if not titres_r:
+        st.error("Aucun EAN détecté.")
+        st.stop()
+
+    res_r = calculer_indicateurs_titres(df, params, titres_r)
+    mapping_anon = obtenir_mapping_anonymisation(df)
+    res_r["Titre"] = res_r["Code_Analytique"].apply(lambda c: mapping_anon.get(c,c) if mode_anon else c)
+
+    df_v_ = df[mask_ventes(df,params)]; df_c_ = df[mask_charges(df,params)]
+    df_r_ = df[mask_retours(df,params)]; df_rem_ = df[mask_remises(df,params)]
+    df_prov = df[mask_provisions_reprises(df,params)]
+    net_p = df_prov["Crédit"].sum()-df_prov["Débit"].sum()
+    ca_b_ = df_v_["Crédit"].sum()-df_v_["Débit"].sum()
+    tr_   = df_r_["Débit"].sum()-df_r_["Crédit"].sum()
+    rem_  = df_rem_["Débit"].sum()-df_rem_["Crédit"].sum()
+    ca_n_ = ca_b_-tr_-rem_
+    ch_t_ = (df_c_["Débit"].sum()-df_c_["Crédit"].sum())-net_p
+    mn_   = ca_n_-ch_t_
+    mb_   = res_r["Marge brute"].sum()
+    taux_mb_ = (mb_/ca_b_*100) if ca_b_ else 0
+    n_pos_ = (res_r["Marge brute"]>0).sum()
+    n_neg_ = (res_r["Marge brute"]<=0).sum()
+    nb_eans_ = len(titres_r)
+    res_sorted_ = res_r.sort_values("Marge brute",ascending=False).reset_index(drop=True)
+
+    st.divider()
+    m1,m2,m3,m4 = st.columns(4)
+    m1.metric("CA net", f"{fmt_fr(ca_n_)} €")
+    m2.metric("Marge brute", f"{fmt_fr(mb_)} €", f"{taux_mb_:.1f} %")
+    m3.metric("Résultat net", f"{fmt_fr(mn_)} €")
+    m4.metric("Titres déficitaires", f"{n_neg_} / {nb_eans_}")
+
+    if st.button("🖨️ Générer le rapport Word", type="primary", use_container_width=True):
+        with st.spinner("Génération en cours..."):
+            try:
+                _MR = RGBColor(0x1F,0x4E,0x79); _TR = RGBColor(0xC0,0x52,0x2A)
+                _WH = RGBColor(0xFF,0xFF,0xFF)
+                _GC = "E2EFDA"; _RC = "FFDDD9"; _YC = "FFF2CC"
+                _BC = "D6E4F0"; _LC = "F5E6DF"
+
+                def _shd(cell, h):
+                    tc=cell._tc; p=tc.get_or_add_tcPr()
+                    for o in p.findall(qn("w:shd")): p.remove(o)
+                    s=OxmlElement("w:shd"); s.set(qn("w:val"),"clear")
+                    s.set(qn("w:color"),"auto"); s.set(qn("w:fill"),h); p.append(s)
+
+                def _brd(cell, c="CCCCCC", z="4"):
+                    tc=cell._tc; p=tc.get_or_add_tcPr()
+                    for o in p.findall(qn("w:tcBorders")): p.remove(o)
+                    b=OxmlElement("w:tcBorders")
+                    for e in ["top","left","bottom","right"]:
+                        x=OxmlElement(f"w:{e}"); x.set(qn("w:val"),"single")
+                        x.set(qn("w:sz"),z); x.set(qn("w:color"),c); b.append(x)
+                    p.append(b)
+
+                def _wc(cell, text, bold=False, italic=False, color=None,
+                         size=9, center=False, fill=None):
+                    if fill: _shd(cell, fill)
+                    _brd(cell); cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                    p=cell.paragraphs[0]; p.clear()
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.LEFT
+                    p.paragraph_format.space_before = Pt(2)
+                    p.paragraph_format.space_after  = Pt(2)
+                    r=p.add_run(str(text)); r.bold=bold; r.italic=italic
+                    r.font.size=Pt(size); r.font.name="Arial"
+                    r.font.color.rgb = color if color else RGBColor(0,0,0)
+
+                def _P(d, text, bold=False, italic=False, size=10,
+                        color=None, align="left", sb=6, sa=6, line=None):
+                    p=d.add_paragraph()
+                    p.paragraph_format.space_before = Pt(sb)
+                    p.paragraph_format.space_after  = Pt(sa)
+                    if line: p.paragraph_format.line_spacing = Pt(line)
+                    p.alignment = {
+                        "left":WD_ALIGN_PARAGRAPH.LEFT,
+                        "center":WD_ALIGN_PARAGRAPH.CENTER,
+                        "right":WD_ALIGN_PARAGRAPH.RIGHT,
+                        "justify":WD_ALIGN_PARAGRAPH.JUSTIFY
+                    }.get(align, WD_ALIGN_PARAGRAPH.LEFT)
+                    r=p.add_run(text); r.bold=bold; r.italic=italic
+                    r.font.size=Pt(size); r.font.name="Arial"
+                    if color: r.font.color.rgb=color
+                    return p
+
+                def _sep(d, col="C0522A"):
+                    p=d.add_paragraph()
+                    p.paragraph_format.space_before=Pt(2); p.paragraph_format.space_after=Pt(6)
+                    pr=p._p.get_or_add_pPr(); pb=OxmlElement("w:pBdr")
+                    bt=OxmlElement("w:bottom"); bt.set(qn("w:val"),"single")
+                    bt.set(qn("w:sz"),"6"); bt.set(qn("w:color"),col)
+                    pb.append(bt); pr.append(pb)
+
+                def _fn(n, sign=False):
+                    return ("+" if (sign and n>=0) else "") + f"{n:,.0f} EUR".replace(",","\u202f")
+
+                def _fp(n): return f"{'+'if n>=0 else ''}{n:.1f}%"
+
+                def _hr(tbl, cols, fill="1F4E79"):
+                    row = tbl.rows[0]
+                    for i,(t,w) in enumerate(cols):
+                        c=row.cells[i]; _wc(c,t,bold=True,color=_WH,size=9,center=True,fill=fill)
+                        if w: c.width=Cm(w)
+
+                # Calculs complémentaires pour le rapport complet
+                mask_ci_rp = df["Code_Analytique"].astype(str).str.upper().isin(
+                    ["CHARGES INDIRECTES","FRAIS GENERAUX"])
+                mask_ci_cpt_rp = df["Compte"].astype(str) == COMPTE_CHARGES_INDIRECTES_REPARTIES
+                ci_total_rp = (df[mask_ci_rp | mask_ci_cpt_rp]["Débit"].sum()
+                               - df[mask_ci_rp | mask_ci_cpt_rp]["Crédit"].sum())
+                ci_par_ean_rp = ci_total_rp / nb_eans_ if nb_eans_ > 0 else 0
+
+                top_list_  = [res_sorted_.iloc[i] for i in range(min(nb_top, len(res_sorted_)))]
+                flop_list_ = [res_sorted_.iloc[-(i+1)] for i in range(min(nb_top, len(res_sorted_)))]
+
+                # ── Document ──
+                d = Document()
+                for s in d.sections:
+                    s.top_margin=Cm(2); s.bottom_margin=Cm(2)
+                    s.left_margin=Cm(2.5); s.right_margin=Cm(2)
+
+                # En-tête cabinet
+                _P(d,"CAB EDITION",bold=True,size=14,color=_MR,sb=0,sa=2)
+                _P(d,"Expert-comptable — Maisons d'édition indépendantes",size=10,
+                   color=RGBColor(0x55,0x55,0x55),sb=0,sa=2)
+                _P(d,"Membre de l'Ordre des Experts-Comptables",size=9,italic=True,
+                   color=RGBColor(0x88,0x88,0x88),sb=0,sa=4)
+
+                _mois_fr_ = {1:"janvier",2:"février",3:"mars",4:"avril",5:"mai",6:"juin",
+                              7:"juillet",8:"août",9:"septembre",10:"octobre",11:"novembre",12:"décembre"}
+                date_fr_  = f"{date_rapport.day} {_mois_fr_[date_rapport.month]} {date_rapport.year}"
+                pr_=d.add_paragraph(); pr_.alignment=WD_ALIGN_PARAGRAPH.RIGHT
+                pr_.paragraph_format.space_before=Pt(0); pr_.paragraph_format.space_after=Pt(4)
+                rr_=pr_.add_run(f"Lille, le {date_fr_}")
+                rr_.font.size=Pt(10); rr_.font.name="Arial"
+                _sep(d)
+
+                _P(d,f"{nom_dirigeant}",bold=True,size=11,sb=4,sa=2)
+                _P(d,nom_editeur,size=11,sb=0,sa=2)
+                _P(d,"Siège social : Lille (59)",size=10,
+                   color=RGBColor(0x55,0x55,0x55),sb=0,sa=10)
+
+                # Objet
+                to_=d.add_table(rows=1,cols=1); to_.style="Table Grid"
+                co_=to_.rows[0].cells[0]; _shd(co_,_BC); _brd(co_)
+                po_=co_.paragraphs[0]
+                po_.paragraph_format.space_before=Pt(4); po_.paragraph_format.space_after=Pt(4)
+                r1_=po_.add_run("Objet : "); r1_.bold=True; r1_.font.size=Pt(10)
+                r1_.font.name="Arial"; r1_.font.color.rgb=_MR
+                r2_=po_.add_run(f"Rapport de pilotage analytique — Exercice {exercice}")
+                r2_.font.size=Pt(10); r2_.font.name="Arial"
+
+                _P(d,"",sb=10,sa=0)
+                _P(d,f"{nom_dirigeant},",bold=True,size=11,sb=0,sa=6)
+                _P(d,f"Conformément aux diligences prévues dans notre mission d'accompagnement au "
+                   f"pilotage analytique, nous avons l'honneur de vous adresser le présent rapport "
+                   f"relatif à l'exercice {exercice}, pour la période du {periode_debut} au {periode_fin}.",
+                   size=10,align="justify",sb=0,sa=6,line=14)
+                _P(d,f"Ce rapport porte sur l'ensemble des {nb_eans_} ISBN actifs de votre catalogue, "
+                   f"traités par notre outil Python VISION EDITION.",
+                   size=10,align="justify",sb=0,sa=6,line=14)
+                _P(d,f"Nous attirons votre attention sur le point central suivant : si votre maison "
+                   f"d'édition dégage une marge brute globale de {_fp(taux_mb_)}, la prise en compte "
+                   f"des charges indirectes de structure conduit à un résultat analytique net de "
+                   f"{_fn(mn_,True)}. Cette situation appelle une analyse approfondie que nous vous "
+                   f"soumettons ci-après.",
+                   size=10,align="justify",sb=0,sa=10,line=14)
+
+                # ── Section I — Synthèse ──
+                _P(d,"I.   SYNTHÈSE DE LA PERFORMANCE ANALYTIQUE",bold=True,size=13,color=_MR,sb=8,sa=4)
+                _sep(d)
+                _P(d,"L'analyse du grand livre analytique de l'exercice fait ressortir les résultats suivants :",
+                   size=10,sb=0,sa=6)
+
+                ts_=d.add_table(rows=6,cols=3); ts_.style="Table Grid"
+                _hr(ts_,[("Indicateur",8),("Montant",3),("Commentaire",5.5)])
+                for i,(lbl,val,cmt,fl) in enumerate([
+                    ("CA net éditeur",_fn(ca_n_),f"{nb_eans_} ISBN actifs",_BC),
+                    ("Charges directes",_fn(ca_n_-mb_),"Fabrication, droits, personnel","FFFFFF"),
+                    ("Marge brute sur ventes",_fn(mb_,True),f"Taux : {_fp(taux_mb_)}",_GC),
+                    ("Charges indirectes de structure",_fn(ci_total_rp),
+                     f"Quote-part par titre : {ci_par_ean_rp:.0f} EUR",_YC),
+                    ("Résultat analytique net",_fn(mn_,True),
+                     "Après affectation charges de structure",_RC if mn_<0 else _GC),
+                ]):
+                    rw_=ts_.rows[i+1]
+                    _wc(rw_.cells[0],lbl,bold=True,size=9,fill=fl)
+                    _wc(rw_.cells[1],val,bold=True,center=True,size=10,
+                        color=RGBColor(0xC0,0,0) if (i==4 and mn_<0) else _MR,fill=fl)
+                    _wc(rw_.cells[2],cmt,italic=True,size=8,
+                        color=RGBColor(0x55,0x55,0x55),fill=fl)
+
+                _P(d,f"L'exercice {exercice} présente une marge brute de {_fn(mb_,True)} ({_fp(taux_mb_)}). "
+                   f"Toutefois, les charges indirectes ({_fn(ci_total_rp)}), réparties sur {nb_eans_} ISBN "
+                   f"actifs à raison de {ci_par_ean_rp:.0f} EUR/titre, conduisent à un résultat analytique "
+                   f"net de {_fn(mn_,True)}.",
+                   size=10,align="justify",sb=6,sa=10,line=14)
+
+                # ── Section II — Analyse par titre ──
+                _P(d,"II.   ANALYSE DE LA RENTABILITÉ PAR TITRE",bold=True,size=13,color=_MR,sb=8,sa=4)
+                _sep(d)
+                _P(d,f"Sur les {nb_eans_} ISBN actifs au catalogue, {n_pos_} dégagent une marge brute "
+                   f"positive et {n_neg_} affichent une marge brute négative "
+                   f"({n_neg_/max(nb_eans_,1)*100:.1f}% du catalogue).",
+                   size=10,align="justify",sb=0,sa=8,line=14)
+
+                _P(d,f"A. Les {nb_top} titres les plus contributifs",bold=True,size=10,color=_MR,sb=4,sa=4)
+                tt_=d.add_table(rows=nb_top+1,cols=5); tt_.style="Table Grid"
+                _hr(tt_,[("Rg",0.8),("Titre",5),("CA net (EUR)",2),("Marge brute (EUR)",2.5),("Statut",1.2)])
+                for i,rd_ in enumerate(top_list_):
+                    bg_= _LC if i%2==0 else "FFFFFF"; rw_=tt_.rows[i+1]
+                    _wc(rw_.cells[0],str(i+1),bold=True,center=True,size=9,color=_TR,fill=bg_)
+                    _wc(rw_.cells[1],str(rd_["Titre"])[:44],bold=True,size=9,color=_MR,fill=bg_)
+                    _wc(rw_.cells[2],_fn(rd_["CA net"]),center=True,size=9,fill=bg_)
+                    _wc(rw_.cells[3],_fn(rd_["Marge brute"],True),bold=True,center=True,size=10,
+                        color=RGBColor(0x21,0x73,0x46),fill=_GC)
+                    _wc(rw_.cells[4],"✓ OK",bold=True,center=True,size=9,
+                        color=RGBColor(0x21,0x73,0x46),fill=_GC)
+
+                if top_list_:
+                    _P(d,f"Nous attirons votre attention sur « {top_list_[0]['Titre']} » qui, avec une "
+                       f"marge brute de {_fn(top_list_[0]['Marge brute'],True)}, constitue le titre "
+                       f"le plus contributif de votre catalogue.",
+                       size=10,align="justify",sb=6,sa=10,line=14)
+
+                _P(d,f"B. Les {nb_top} titres les plus déficitaires — Action corrective requise",
+                   bold=True,size=10,color=RGBColor(0xC0,0,0),sb=4,sa=4)
+                tf_=d.add_table(rows=nb_top+1,cols=5); tf_.style="Table Grid"
+                _hr(tf_,[("Rg",0.8),("Titre",5),("CA net (EUR)",2),("Marge brute (EUR)",2.5),("Statut",1.2)],
+                    fill="C00000")
+                for i,rd_ in enumerate(flop_list_):
+                    bg_="FFF5F5" if i%2==0 else "FFFFFF"; rw_=tf_.rows[i+1]
+                    _wc(rw_.cells[0],str(i+1),bold=True,center=True,size=9,
+                        color=RGBColor(0xC0,0,0),fill=bg_)
+                    _wc(rw_.cells[1],str(rd_["Titre"])[:44],bold=True,size=9,
+                        color=RGBColor(0xC0,0,0),fill=bg_)
+                    _wc(rw_.cells[2],_fn(rd_["CA net"]),center=True,size=9,fill=bg_)
+                    _wc(rw_.cells[3],_fn(rd_["Marge brute"],True),bold=True,center=True,size=10,
+                        color=RGBColor(0xC0,0,0),fill=_RC)
+                    _wc(rw_.cells[4],"⚠ Alerte",bold=True,center=True,size=9,
+                        color=RGBColor(0xC0,0,0),fill=_RC)
+
+                if flop_list_:
+                    _P(d,f"Nous appelons votre attention sur « {flop_list_[0]['Titre']} » qui accuse "
+                       f"une perte de {abs(flop_list_[0]['Marge brute']):,.0f} EUR. L'ensemble de ces "
+                       f"titres déficitaires appelle les mesures correctives détaillées en section IV.",
+                       size=10,align="justify",sb=6,sa=10,line=14)
+
+                # ── Section III — Charges indirectes ──
+                _P(d,"III.   CHARGES INDIRECTES DE STRUCTURE",bold=True,size=13,color=_MR,sb=8,sa=4)
+                _sep(d)
+                _P(d,f"Les charges indirectes de structure s'élèvent à {_fn(ci_total_rp)}, soit "
+                   f"{ci_total_rp/max(ca_n_,1)*100:.1f}% du chiffre d'affaires net. "
+                   f"Avec {nb_eans_} ISBN actifs, chaque titre doit dégager une marge brute minimale "
+                   f"de {ci_par_ean_rp:.0f} EUR pour couvrir sa quote-part de structure.",
+                   size=10,align="justify",sb=0,sa=8,line=14)
+
+                tc_=d.add_table(rows=3,cols=3); tc_.style="Table Grid"
+                _hr(tc_,[("Indicateur",6),("Valeur",2.5),("Commentaire",7)])
+                for i,(lbl,val,cmt,fl) in enumerate([
+                    ("Charges indirectes totales",_fn(ci_total_rp),
+                     "Loyer, salaires, charges de structure, honoraires transversaux",_BC),
+                    ("Quote-part par titre actif",f"{ci_par_ean_rp:.0f} EUR/titre",
+                     f"Clé de répartition : {nb_eans_} titres actifs — prorata catalogue","FFFFFF"),
+                ]):
+                    rw_=tc_.rows[i+1]
+                    _wc(rw_.cells[0],lbl,bold=True,size=9,fill=fl)
+                    _wc(rw_.cells[1],val,bold=True,center=True,size=10,color=_MR,fill=fl)
+                    _wc(rw_.cells[2],cmt,italic=True,size=8,color=RGBColor(0x55,0x55,0x55),fill=fl)
+
+                _P(d,f"Cette quote-part de {ci_par_ean_rp:.0f} EUR par titre constitue le seuil de "
+                   f"rentabilité analytique minimal de chaque ISBN. Tout titre dont la marge brute "
+                   f"est inférieure à ce seuil contribue négativement au résultat global.",
+                   size=10,align="justify",sb=6,sa=10,line=14)
+
+                # ── Section IV — Recommandations ──
+                _P(d,"IV.   RECOMMANDATIONS ET PLAN D'ACTION",bold=True,size=13,color=_MR,sb=8,sa=4)
+                _sep(d)
+                _P(d,"Au vu de l'analyse ci-avant, nous vous soumettons les recommandations suivantes :",
+                   size=10,sb=0,sa=6)
+
+                tr_=d.add_table(rows=5,cols=4); tr_.style="Table Grid"
+                _hr(tr_,[("Priorité",1.5),("Recommandation",5),("Action à engager",4),("Délai",2)])
+                for i,(prio,rec,action,delai,fl) in enumerate([
+                    ("1 — URGENT",f"Analyse des {n_neg_} titres déficitaires",
+                     "Décision maintien ou arrêt commercial","Immédiat",_RC),
+                    ("2 — URGENT","Gel des réimpressions des titres déficitaires",
+                     "Suspension commandes impression en attente d'analyse","Immédiat","FFFFFF"),
+                    ("3 — IMPORTANT","Réexamen des charges indirectes de structure",
+                     "Audit des postes de charges — optimisation possible","T+3 mois",_YC),
+                    ("4 — IMPORTANT",f"Réimpression prioritaire des {nb_top} titres porteurs",
+                     "Lancement procédure réimpression","T+2 mois","FFFFFF"),
+                ]):
+                    rw_=tr_.rows[i+1]; urgent="URGENT" in prio
+                    _wc(rw_.cells[0],prio,bold=True,center=True,size=8,
+                        color=RGBColor(0xC0,0,0) if urgent else RGBColor(0xA6,0x7C,0),
+                        fill=_RC if urgent else _YC)
+                    _wc(rw_.cells[1],rec,bold=True,size=9,fill=fl)
+                    _wc(rw_.cells[2],action,size=9,fill=fl)
+                    _wc(rw_.cells[3],delai,center=True,bold=True,size=9,
+                        color=RGBColor(0xC0,0,0) if urgent else RGBColor(0xA6,0x7C,0),fill=fl)
+
+                _P(d,"",sb=10,sa=0)
+
+                # ── Section V — Conclusion et prochaines étapes ──
+                _P(d,"V.   CONCLUSION ET PROCHAINES ÉTAPES",bold=True,size=13,color=_MR,sb=8,sa=4)
+                _sep(d)
+                _P(d,"Le présent rapport met en évidence la nécessité d'engager rapidement une "
+                   "réflexion sur la structure de votre catalogue et sur le niveau de vos charges "
+                   "indirectes. La rentabilité analytique globale dépend directement de la capacité "
+                   "de chaque titre à couvrir sa quote-part de charges de structure.",
+                   size=10,align="justify",sb=0,sa=6,line=14)
+
+                tv_=d.add_table(rows=4,cols=2); tv_.style="Table Grid"
+                _hr(tv_,[("Prochaine étape",8.5),("Échéance",3)])
+                for i,(etape,echeance,fl) in enumerate([
+                    ("Réunion de restitution et analyse des titres déficitaires","Prochain trimestre",_BC),
+                    ("Mise à jour des données analytiques (mois suivant)","Mensuel",_LC),
+                    ("Révision du plan d'action suite décisions prises","Après réunion","FFFFFF"),
+                ]):
+                    rw_=tv_.rows[i+1]
+                    _wc(rw_.cells[0],etape,size=9,fill=fl)
+                    _wc(rw_.cells[1],echeance,bold=True,center=True,size=9,color=_MR,fill=fl)
+
+                _P(d,"",sb=10,sa=0)
+                _P(d,"Nous demeurons à votre entière disposition pour discuter de ces éléments lors "
+                   "de notre prochaine réunion trimestrielle de restitution et vous prions d'agréer, "
+                   f"{nom_dirigeant}, l'expression de nos salutations distinguées.",
+                   size=10,align="justify",sb=0,sa=16,line=14)
+
+                # Signatures
+                ts2_=d.add_table(rows=1,cols=2); ts2_.style="Table Grid"
+                for cs_,ti_,fi_,ci__ in [
+                    (ts2_.rows[0].cells[0],f"L'Expert-Comptable\nCAB EDITION",_BC,_MR),
+                    (ts2_.rows[0].cells[1],f"Le Dirigeant\n{nom_editeur}",_LC,_TR)
+                ]:
+                    _shd(cs_,fi_); _brd(cs_)
+                    ps_=cs_.paragraphs[0]
+                    ps_.paragraph_format.space_before=Pt(6); ps_.paragraph_format.space_after=Pt(6)
+                    for j,li_ in enumerate([ti_,"\n\nSignature : ______________________",
+                                             "\nDate : ___________________________"]):
+                        rs_=ps_.add_run(li_); rs_.font.size=Pt(9); rs_.font.name="Arial"
+                        rs_.bold=(j==0); rs_.font.color.rgb=ci__
+
+                # Note méthodologique
+                _P(d,"",sb=8,sa=0)
+                pn_=d.add_paragraph()
+                pn_.paragraph_format.space_before=Pt(4); pn_.paragraph_format.space_after=Pt(4)
+                rn1_=pn_.add_run("Note méthodologique : ")
+                rn1_.bold=True; rn1_.font.size=Pt(8); rn1_.font.name="Arial"
+                rn1_.font.color.rgb=RGBColor(0x55,0x55,0x55)
+                sfx_ = " (titres anonymisés)" if mode_anon else ""
+                rn2_=pn_.add_run(
+                    f"Rapport généré automatiquement par Python VISION EDITION — "
+                    f"Période : {periode_debut} au {periode_fin} — "
+                    f"{nb_eans_} ISBN actifs{sfx_} — "
+                    f"Charges indirectes réparties au prorata du nombre de titres actifs — "
+                    f"Données provisoires à la date du {date_fr_}."
+                )
+                rn2_.italic=True; rn2_.font.size=Pt(8); rn2_.font.name="Arial"
+                rn2_.font.color.rgb=RGBColor(0x77,0x77,0x77)
+
+                buf_w=BytesIO(); d.save(buf_w); buf_w.seek(0)
+                fn_w = (f"Rapport_Pilotage_{nom_editeur[:20].replace(' ','_')}_"
+                        f"{exercice.replace('/','_')}.docx")
+                st.success("✅ Rapport de pilotage généré avec succès !")
+                st.download_button(
+                    "⬇️ Télécharger le rapport Word",
+                    data=buf_w, file_name=fn_w,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True, type="primary"
+                )
+
+            except Exception as e:
+                st.error(f"❌ Erreur : {e}")
+                st.exception(e)
 
 
 # ── TRÉSORERIE (EC) ──
@@ -1573,7 +2626,23 @@ elif role == "dirigeant" and page == "🏠 Mon tableau de bord":
     df, params, dos = get_df_dirigeant()
     st.title(f"📚 {dos['nom']}")
     st.markdown(f"*Tableau de bord de pilotage — Exercice {dos.get('exercice','')}*")
-    st.divider()
+
+    # Affichage des notifications non lues
+    did_dir = st.session_state["dossier_id"]
+    notifs_dir = [n for n in dos.get("notifications", []) if not n["lu"]]
+    if notifs_dir:
+        st.markdown("### 🔔 Messages de votre cabinet")
+        for n in notifs_dir:
+            if n["type"] == "warning":
+                st.warning(f"**{n['date']}** — {n['message']}")
+            elif n["type"] == "error":
+                st.error(f"**{n['date']}** — {n['message']}")
+            else:
+                st.info(f"**{n['date']}** — {n['message']}")
+        if st.button("✅ Marquer comme lu(s)", key="mark_read"):
+            marquer_notifications_lues(did_dir)
+            st.rerun()
+        st.divider()
 
     df_v_ = df[mask_ventes(df,params)]; df_r_ = df[mask_retours(df,params)]
     df_rem_ = df[mask_remises(df,params)]; df_c_ = df[mask_charges(df,params)]
@@ -1830,6 +2899,8 @@ Top 5 titres par CA net :
     if st.button("🗑️ Effacer la conversation"):
         st.session_state["messages_agent"] = []
         st.rerun()
+
+
 
 # ============================================================
 # FOOTER
