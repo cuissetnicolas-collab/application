@@ -3587,7 +3587,7 @@ elif role == "ec" and page == "📋 Plan d'action":
                 kpis_=[
                     ("Résultat analytique net",f"{'+ ' if res_pa>=0 else '− '}{fmt_fr(abs(res_pa))} EUR","après charges indirectes","FFDDD9" if res_pa<0 else "E2EFDA","C00000" if res_pa<0 else "217346"),
                     ("Marge brute globale",f"+ {fmt_fr(mb_pa)} EUR",f"soit +{taux_mb_pa:.1f}% du CA net","E2EFDA","217346"),
-                    ("Charges indirectes",f"{fmt_fr(ci_pa)} EUR",f"{fmt_fr(ci_par_titre_pa):.0f} EUR/titre — {(ci_pa/ca_n_pa*100):.1f}% du CA net" if ca_n_pa else "","FFF2CC","A67C00"),
+                    ("Charges indirectes",f"{fmt_fr(ci_pa)} EUR",f"{ci_par_titre_pa:.0f} EUR/titre — {(ci_pa/ca_n_pa*100):.1f}% du CA net" if ca_n_pa else "","FFF2CC","A67C00"),
                     ("ISBN actifs",f"{nb_isbn_pa} titres",f"{n_neg_pa} déficitaires / {n_pos_pa} bénéficiaires","D6E4F0","1F4E79"),
                 ]
                 for i,(lbl,val,cmt,bg_k,col_k) in enumerate(kpis_):
