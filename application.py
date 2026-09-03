@@ -1429,14 +1429,17 @@ elif role == "ec" and page == "📖 Analyse par titre":
     st.subheader("🧭 Repères rapides")
     col_s, col_t, col_f = st.columns(3)
 
-    def _liste_titres(container, sous_titre, df_tri, col_montant):
+    def _liste_titres(container, sous_titre, df_tri, col_montant, prefix_key):
         container.markdown(f"**{sous_titre}**")
         for _, row in df_tri.iterrows():
-            container.write(f"{row['Signal']} **{label_affiche(row['Code_Analytique'],df)}** — {fmt_fr(row[col_montant])} €")
+            c1, c2 = container.columns([4, 1])
+            c1.markdown(f"{row['Signal']} **{label_affiche(row['Code_Analytique'],df)}** — {fmt_fr(row[col_montant])} €")
+            if c2.button("Voir", key=f"{prefix_key}_{row['Code_Analytique']}", use_container_width=True):
+                afficher_fiche_titre(row["Code_Analytique"], df, params)
 
-    _liste_titres(col_s, "📊 Plus significatifs (CA brut)", indic.sort_values("Ventes HT",ascending=False).head(5), "Ventes HT")
-    _liste_titres(col_t, "🏆 Plus rentables (résultat net)", indic.sort_values("Résultat net",ascending=False).head(5), "Résultat net")
-    _liste_titres(col_f, "⚠️ Plus difficiles (résultat net)", indic.sort_values("Résultat net",ascending=True).head(5), "Résultat net")
+    _liste_titres(col_s, "📊 Plus significatifs (CA brut)", indic.sort_values("Ventes HT",ascending=False).head(5), "Ventes HT", "signif")
+    _liste_titres(col_t, "🏆 Plus rentables (résultat net)", indic.sort_values("Résultat net",ascending=False).head(5), "Résultat net", "rent")
+    _liste_titres(col_f, "⚠️ Plus difficiles (résultat net)", indic.sort_values("Résultat net",ascending=True).head(5), "Résultat net", "diff")
 
     st.divider()
     st.divider()
@@ -1764,70 +1767,198 @@ elif role == "ec" and page == "✍️ Droits d'auteurs":
     dos = get_dossier(st.session_state["dossier_id"])
     st.header(f"✍️ Droits d'auteurs — {dos['nom']}")
     st.info("Module complet disponible — configurez les comptes ci-dessous.")
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    col1,col2 = st.columns(2)
-    with col1:
-        date_debut_d = st.date_input("Période du", df["Date"].dropna().min().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_d")
-        compte_db = st.text_input("Droits bruts (charge)", value="604300000")
-        compte_urs = st.text_input("URSSAF à payer", value="438106")
-    with col2:
-        date_fin_d = st.date_input("Au", df["Date"].dropna().max().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_f")
-        compte_diff = st.text_input("Contribution diffuseur", value="645106")
-        compte_net  = st.text_input("Droits à payer (net)", value="408106")
+    st.info(
+        "**Comment fonctionne ce module ?** "
+        "Les droits d'auteurs déjà comptabilisés sont lus directement dans votre grand livre. "
+        "Un simulateur est disponible pour estimer avant provision."
+    )
 
-    mask_p = (df["Date"]>=pd.to_datetime(date_debut_d)) & (df["Date"]<=pd.to_datetime(date_fin_d))
-    df_p = df[mask_p]
+    ong1, ong2, ong3, ong4 = st.tabs([
+        "📋 Référentiel contrats",
+        "🧮 Simulateur",
+        "📒 Réel (comptabilisé)",
+        "📄 Relevés par auteur"
+    ])
 
-    def par_isbn(cpt, sens):
-        m = df_p["Compte"].astype(str).str.strip()==str(cpt).strip()
-        if not m.any(): return pd.Series(dtype=float)
-        g = df_p[m].groupby("Code_Analytique")
-        return (g["Débit"].sum()-g["Crédit"].sum()) if sens=="debit" else (g["Crédit"].sum()-g["Débit"].sum())
+    # ── Initialisation référentiel ──
+    if "royalties_referentiel" not in st.session_state:
+        st.session_state["royalties_referentiel"] = []
 
-    db_s = par_isbn(compte_db,"debit"); urs_s = par_isbn(compte_urs,"credit")
-    diff_s = par_isbn(compte_diff,"debit"); net_s = par_isbn(compte_net,"credit")
-    av_s = par_isbn("409600","debit")
+    with ong1:
+        st.subheader("Saisie des contrats auteurs")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            inp_auteur = st.text_input("Nom de l'auteur", key="da_auteur")
+            inp_isbn   = st.text_input("ISBN (code analytique exact du socle)", key="da_isbn")
+            inp_titre  = st.text_input("Titre du livre", key="da_titre")
+        with col_b:
+            inp_part   = st.number_input("Part de cet auteur (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0, key="da_part")
+            inp_statut = st.selectbox("Statut fiscal", ["Traitements et salaires (option assimilé)","BNC (droits d'auteur)"], key="da_statut")
+            inp_taux   = st.number_input("Taux forfaitaire (%)", value=10.0, step=0.5, key="da_taux")
+        if st.button("➕ Ajouter ce contrat", key="da_add"):
+            if inp_auteur and inp_isbn:
+                st.session_state["royalties_referentiel"].append({
+                    "auteur": inp_auteur, "isbn": inp_isbn.strip(),
+                    "titre": inp_titre or inp_isbn, "part": inp_part,
+                    "statut_fiscal": inp_statut,
+                    "paliers": [{"seuil": 0, "taux": inp_taux}]
+                })
+                st.success(f"✅ Contrat ajouté : {inp_auteur} / {inp_titre or inp_isbn}")
+        st.divider()
+        ref = st.session_state["royalties_referentiel"]
+        if ref:
+            rows_ref = [{"Auteur":c["auteur"],"ISBN":c["isbn"],"Titre":c["titre"],
+                         "Part (%)":c["part"],"Taux (%)":c["paliers"][0]["taux"],
+                         "Statut":c.get("statut_fiscal","")} for c in ref]
+            st.dataframe(pd.DataFrame(rows_ref), use_container_width=True, hide_index=True)
+            idx_s = st.number_input("Supprimer le contrat n°", min_value=0, max_value=max(0,len(ref)-1), step=1, key="da_del_idx")
+            if st.button("🗑️ Supprimer", key="da_del"):
+                st.session_state["royalties_referentiel"].pop(int(idx_s)); st.rerun()
+        else:
+            st.info("Aucun contrat enregistré.")
 
-    isbns_d = sorted(set(db_s.index)|set(urs_s.index)|set(diff_s.index)|set(net_s.index))
-    isbns_d = [i for i in isbns_d if str(i).strip() not in ("","CHARGES INDIRECTES","PRODUITS INDIRECTS")]
+    with ong2:
+        st.subheader("Simulateur — droits d'auteur & précompte URSSAF")
+        if "df_pivot" not in st.session_state or not st.session_state["royalties_referentiel"]:
+            st.warning("⚠️ Générez d'abord le socle et saisissez au moins un contrat dans l'onglet Référentiel.")
+        else:
+            df_sim2 = df.copy()
+            params_sim2 = params
+            resultats_sim = []
+            for contrat in st.session_state["royalties_referentiel"]:
+                isbn = contrat["isbn"]
+                mask_v2 = df_sim2["Compte"].astype(str).str.startswith(tuple(params_sim2["ventes"]))
+                mask_r2 = df_sim2["Compte"].astype(str).str.startswith(tuple(params_sim2["retours"]))
+                mask_rem2 = df_sim2["Compte"].astype(str).str.startswith(tuple(params_sim2.get("remises",[])))
+                df_i2 = df_sim2[df_sim2["Code_Analytique"]==isbn]
+                ca_b2  = df_i2[mask_v2.reindex(df_i2.index,fill_value=False)]["Crédit"].sum()
+                ret2   = df_i2[mask_r2.reindex(df_i2.index,fill_value=False)]["Débit"].sum()
+                rem2   = df_i2[mask_rem2.reindex(df_i2.index,fill_value=False)]["Débit"].sum()
+                ca_n2  = ca_b2 - ret2 - rem2
+                base2  = max(ca_n2, 0)
+                taux2  = contrat["paliers"][0]["taux"] / 100
+                droits_bruts = base2 * taux2 * contrat["part"] / 100
+                resultats_sim.append({
+                    "Auteur": contrat["auteur"], "Titre": contrat["titre"],
+                    "Statut": contrat.get("statut_fiscal",""),
+                    "CA net (€)": round(ca_n2,2),
+                    "Base calcul (€)": round(base2,2),
+                    "Droits bruts (€)": round(droits_bruts,2),
+                })
+            df_sim_res = pd.DataFrame(resultats_sim)
+            cols_s2 = ["CA net (€)","Base calcul (€)","Droits bruts (€)"]
+            st.dataframe(df_sim_res.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_s2}), use_container_width=True)
+            total_bruts = df_sim_res["Droits bruts (€)"].sum()
+            st.metric("💰 Total droits bruts estimés", f"{fmt_fr(total_bruts,2)} €")
+            st.divider()
+            st.markdown("**Précompte URSSAF estimé**")
+            col_u1,col_u2,col_u3,col_u4 = st.columns(4)
+            taux_csg  = col_u1.number_input("CSG+CRDS (%)", value=9.70, step=0.01, key="da_csg")
+            taux_fp   = col_u2.number_input("Formation prof. (%)", value=1.00, step=0.01, key="da_fp")
+            taux_raap = col_u3.number_input("RAAP (%)", value=0.0, step=0.01, key="da_raap")
+            taux_diff = col_u4.number_input("Contribution diffuseur (%)", value=1.10, step=0.05, key="da_diff_taux")
+            est_ts = df_sim_res["Statut"].str.startswith("Traitements")
+            assiette = df_sim_res["Droits bruts (€)"] * 0.9825
+            precompte = np.where(est_ts, assiette*(taux_csg+taux_fp+taux_raap)/100, 0.0)
+            contrib   = df_sim_res["Droits bruts (€)"] * taux_diff / 100
+            total_urssaf_s = precompte.sum() + contrib.sum()
+            cu1,cu2,cu3 = st.columns(3)
+            cu1.metric("Précompte URSSAF (TS)", f"{fmt_fr(precompte.sum(),2)} €")
+            cu2.metric("Contribution diffuseur", f"{fmt_fr(contrib.sum(),2)} €")
+            cu3.metric("Total à reverser URSSAF", f"{fmt_fr(total_urssaf_s,2)} €")
 
-    if not isbns_d:
-        st.info("Aucune écriture trouvée sur ces comptes pour la période.")
-    else:
-        lignes = []
-        for isbn in isbns_d:
-            lignes.append({
-                "ISBN": isbn,
-                "Droits bruts (€)": round(float(db_s.get(isbn,0)),2),
-                "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
-                "Précompte URSSAF (€)": round(float(urs_s.get(isbn,0)),2),
-                "Net dû auteur (€)": round(float(net_s.get(isbn,0)),2),
-                "À-valoir restant (€)": round(float(av_s.get(isbn,0)),2),
-            })
-        df_d = pd.DataFrame(lignes)
-        cols_m = ["Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]
-        st.dataframe(df_d.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m}), use_container_width=True)
+    with ong3:
+        st.subheader("Montants réellement comptabilisés")
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        col1_d,col2_d = st.columns(2)
+        with col1_d:
+            date_debut_d = st.date_input("Période du", df["Date"].dropna().min().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_d")
+            compte_db  = st.text_input("Droits bruts (charge)", value="604300000", key="da_cpt_db")
+            compte_urs = st.text_input("URSSAF à payer", value="438106", key="da_cpt_urs")
+        with col2_d:
+            date_fin_d = st.date_input("Au", df["Date"].dropna().max().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_f")
+            compte_diff_d = st.text_input("Contribution diffuseur", value="645106", key="da_cpt_diff")
+            compte_net_d  = st.text_input("Droits à payer (net)", value="408106", key="da_cpt_net")
+            compte_av_d   = st.text_input("À-valoirs (bilan)", value="409600", key="da_cpt_av")
 
-        total_db = df_d["Droits bruts (€)"].sum()
-        total_urs = df_d["Précompte URSSAF (€)"].sum()
-        total_diff = df_d["Contribution diffuseur (€)"].sum()
-        total_net = df_d["Net dû auteur (€)"].sum()
+        mask_p = (df["Date"]>=pd.to_datetime(date_debut_d)) & (df["Date"]<=pd.to_datetime(date_fin_d))
+        df_p = df[mask_p]
 
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("Droits bruts", f"{fmt_fr(total_db,2)} €")
-        c2.metric("Précompte URSSAF", f"{fmt_fr(total_urs,2)} €")
-        c3.metric("Contribution diffuseur", f"{fmt_fr(total_diff,2)} €")
-        c4.metric("Net dû aux auteurs", f"{fmt_fr(total_net,2)} €")
+        def par_isbn_d(cpt, sens):
+            m = df_p["Compte"].astype(str).str.strip()==str(cpt).strip()
+            if not m.any(): return pd.Series(dtype=float)
+            g = df_p[m].groupby("Code_Analytique")
+            return (g["Débit"].sum()-g["Crédit"].sum()) if sens=="debit" else (g["Crédit"].sum()-g["Débit"].sum())
 
-        st.markdown(f"**Total à reverser URSSAF : {fmt_fr(total_urs+total_diff,2)} €**")
+        db_s   = par_isbn_d(compte_db,"debit")
+        urs_s  = par_isbn_d(compte_urs,"credit")
+        diff_s = par_isbn_d(compte_diff_d,"debit")
+        net_s  = par_isbn_d(compte_net_d,"credit")
+        av_s   = par_isbn_d(compte_av_d,"debit")
 
-        buf_d = BytesIO()
-        with pd.ExcelWriter(buf_d, engine="openpyxl") as writer:
-            df_d.to_excel(writer, index=False, sheet_name="Droits_auteurs")
-        buf_d.seek(0)
-        st.download_button("📥 Exporter (Excel)", buf_d,
-            file_name=f"Droits_auteurs_{date_debut_d}_{date_fin_d}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        isbns_d = sorted(set(db_s.index)|set(urs_s.index)|set(diff_s.index)|set(net_s.index))
+        isbns_d = [i for i in isbns_d if str(i).strip() not in ("","CHARGES INDIRECTES","PRODUITS INDIRECTS")]
+
+        if not isbns_d:
+            st.info("Aucune écriture trouvée sur ces comptes pour la période.")
+        else:
+            lignes_d = []
+            for isbn in isbns_d:
+                lignes_d.append({
+                    "ISBN": isbn,
+                    "Droits bruts (€)":         round(float(db_s.get(isbn,0)),2),
+                    "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
+                    "Précompte URSSAF (€)":      round(float(urs_s.get(isbn,0)),2),
+                    "Net dû auteur (€)":         round(float(net_s.get(isbn,0)),2),
+                    "À-valoir restant (€)":      round(float(av_s.get(isbn,0)),2),
+                })
+            df_d = pd.DataFrame(lignes_d)
+            cols_m = ["Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]
+            st.dataframe(df_d.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m}), use_container_width=True)
+            total_db  = df_d["Droits bruts (€)"].sum()
+            total_urs = df_d["Précompte URSSAF (€)"].sum()
+            total_diff_t = df_d["Contribution diffuseur (€)"].sum()
+            total_net = df_d["Net dû auteur (€)"].sum()
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("Droits bruts", f"{fmt_fr(total_db,2)} €")
+            c2.metric("Précompte URSSAF", f"{fmt_fr(total_urs,2)} €")
+            c3.metric("Contribution diffuseur", f"{fmt_fr(total_diff_t,2)} €")
+            c4.metric("Net dû aux auteurs", f"{fmt_fr(total_net,2)} €")
+            st.markdown(f"**🏛️ Total à reverser à l'URSSAF : {fmt_fr(total_urs+total_diff_t,2)} €**")
+            st.session_state["df_royalties_reel"] = df_d
+            buf_d = BytesIO()
+            with pd.ExcelWriter(buf_d, engine="openpyxl") as writer:
+                df_d.to_excel(writer, index=False, sheet_name="Droits_auteurs")
+            buf_d.seek(0)
+            st.download_button("📥 Exporter (Excel)", buf_d,
+                file_name=f"Droits_auteurs_{date_debut_d}_{date_fin_d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="da_export")
+
+    with ong4:
+        st.subheader("Relevés de droits par auteur")
+        if "df_royalties_reel" not in st.session_state or st.session_state["df_royalties_reel"].empty:
+            st.warning("⚠️ Effectuez d'abord la lecture dans l'onglet 📒 Réel (comptabilisé).")
+        else:
+            df_rel = st.session_state["df_royalties_reel"].copy()
+            auteurs_list = ["Tous"]
+            ref_map = {c["isbn"]: c["auteur"] for c in st.session_state.get("royalties_referentiel",[])}
+            if ref_map:
+                df_rel["Auteur"] = df_rel["ISBN"].map(ref_map).fillna("(auteur non identifié)")
+                auteurs_list += sorted(df_rel["Auteur"].unique().tolist())
+            auteur_sel = st.selectbox("Sélectionner un auteur", auteurs_list, key="da_auteur_sel")
+            df_aff = df_rel if auteur_sel=="Tous" else df_rel[df_rel["Auteur"]==auteur_sel]
+            cols_rel = [c for c in df_aff.columns if c in ["Auteur","ISBN","Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]]
+            cols_m_rel = [c for c in cols_rel if "(€)" in c]
+            st.dataframe(df_aff[cols_rel].style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m_rel}), use_container_width=True, hide_index=True)
+            buf_rel = BytesIO()
+            with pd.ExcelWriter(buf_rel, engine="openpyxl") as writer:
+                df_aff[cols_rel].to_excel(writer, index=False, sheet_name="Releve")
+            buf_rel.seek(0)
+            st.download_button(f"📥 Télécharger relevé — {auteur_sel}", buf_rel,
+                file_name=f"Royalties_{auteur_sel.replace(' ','_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="da_export_releve")
 
 # ── RETOURS & REMISES (EC) ──
 elif role == "ec" and page == "📦 Retours & Remises":
@@ -2456,70 +2587,198 @@ elif role == "ec" and page == "✍️ Droits d'auteurs":
     dos = get_dossier(st.session_state["dossier_id"])
     st.header(f"✍️ Droits d'auteurs — {dos['nom']}")
     st.info("Module complet disponible — configurez les comptes ci-dessous.")
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    col1,col2 = st.columns(2)
-    with col1:
-        date_debut_d = st.date_input("Période du", df["Date"].dropna().min().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_d")
-        compte_db = st.text_input("Droits bruts (charge)", value="604300000")
-        compte_urs = st.text_input("URSSAF à payer", value="438106")
-    with col2:
-        date_fin_d = st.date_input("Au", df["Date"].dropna().max().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_f")
-        compte_diff = st.text_input("Contribution diffuseur", value="645106")
-        compte_net  = st.text_input("Droits à payer (net)", value="408106")
+    st.info(
+        "**Comment fonctionne ce module ?** "
+        "Les droits d'auteurs déjà comptabilisés sont lus directement dans votre grand livre. "
+        "Un simulateur est disponible pour estimer avant provision."
+    )
 
-    mask_p = (df["Date"]>=pd.to_datetime(date_debut_d)) & (df["Date"]<=pd.to_datetime(date_fin_d))
-    df_p = df[mask_p]
+    ong1, ong2, ong3, ong4 = st.tabs([
+        "📋 Référentiel contrats",
+        "🧮 Simulateur",
+        "📒 Réel (comptabilisé)",
+        "📄 Relevés par auteur"
+    ])
 
-    def par_isbn(cpt, sens):
-        m = df_p["Compte"].astype(str).str.strip()==str(cpt).strip()
-        if not m.any(): return pd.Series(dtype=float)
-        g = df_p[m].groupby("Code_Analytique")
-        return (g["Débit"].sum()-g["Crédit"].sum()) if sens=="debit" else (g["Crédit"].sum()-g["Débit"].sum())
+    # ── Initialisation référentiel ──
+    if "royalties_referentiel" not in st.session_state:
+        st.session_state["royalties_referentiel"] = []
 
-    db_s = par_isbn(compte_db,"debit"); urs_s = par_isbn(compte_urs,"credit")
-    diff_s = par_isbn(compte_diff,"debit"); net_s = par_isbn(compte_net,"credit")
-    av_s = par_isbn("409600","debit")
+    with ong1:
+        st.subheader("Saisie des contrats auteurs")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            inp_auteur = st.text_input("Nom de l'auteur", key="da_auteur")
+            inp_isbn   = st.text_input("ISBN (code analytique exact du socle)", key="da_isbn")
+            inp_titre  = st.text_input("Titre du livre", key="da_titre")
+        with col_b:
+            inp_part   = st.number_input("Part de cet auteur (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0, key="da_part")
+            inp_statut = st.selectbox("Statut fiscal", ["Traitements et salaires (option assimilé)","BNC (droits d'auteur)"], key="da_statut")
+            inp_taux   = st.number_input("Taux forfaitaire (%)", value=10.0, step=0.5, key="da_taux")
+        if st.button("➕ Ajouter ce contrat", key="da_add"):
+            if inp_auteur and inp_isbn:
+                st.session_state["royalties_referentiel"].append({
+                    "auteur": inp_auteur, "isbn": inp_isbn.strip(),
+                    "titre": inp_titre or inp_isbn, "part": inp_part,
+                    "statut_fiscal": inp_statut,
+                    "paliers": [{"seuil": 0, "taux": inp_taux}]
+                })
+                st.success(f"✅ Contrat ajouté : {inp_auteur} / {inp_titre or inp_isbn}")
+        st.divider()
+        ref = st.session_state["royalties_referentiel"]
+        if ref:
+            rows_ref = [{"Auteur":c["auteur"],"ISBN":c["isbn"],"Titre":c["titre"],
+                         "Part (%)":c["part"],"Taux (%)":c["paliers"][0]["taux"],
+                         "Statut":c.get("statut_fiscal","")} for c in ref]
+            st.dataframe(pd.DataFrame(rows_ref), use_container_width=True, hide_index=True)
+            idx_s = st.number_input("Supprimer le contrat n°", min_value=0, max_value=max(0,len(ref)-1), step=1, key="da_del_idx")
+            if st.button("🗑️ Supprimer", key="da_del"):
+                st.session_state["royalties_referentiel"].pop(int(idx_s)); st.rerun()
+        else:
+            st.info("Aucun contrat enregistré.")
 
-    isbns_d = sorted(set(db_s.index)|set(urs_s.index)|set(diff_s.index)|set(net_s.index))
-    isbns_d = [i for i in isbns_d if str(i).strip() not in ("","CHARGES INDIRECTES","PRODUITS INDIRECTS")]
+    with ong2:
+        st.subheader("Simulateur — droits d'auteur & précompte URSSAF")
+        if "df_pivot" not in st.session_state or not st.session_state["royalties_referentiel"]:
+            st.warning("⚠️ Générez d'abord le socle et saisissez au moins un contrat dans l'onglet Référentiel.")
+        else:
+            df_sim2 = df.copy()
+            params_sim2 = params
+            resultats_sim = []
+            for contrat in st.session_state["royalties_referentiel"]:
+                isbn = contrat["isbn"]
+                mask_v2 = df_sim2["Compte"].astype(str).str.startswith(tuple(params_sim2["ventes"]))
+                mask_r2 = df_sim2["Compte"].astype(str).str.startswith(tuple(params_sim2["retours"]))
+                mask_rem2 = df_sim2["Compte"].astype(str).str.startswith(tuple(params_sim2.get("remises",[])))
+                df_i2 = df_sim2[df_sim2["Code_Analytique"]==isbn]
+                ca_b2  = df_i2[mask_v2.reindex(df_i2.index,fill_value=False)]["Crédit"].sum()
+                ret2   = df_i2[mask_r2.reindex(df_i2.index,fill_value=False)]["Débit"].sum()
+                rem2   = df_i2[mask_rem2.reindex(df_i2.index,fill_value=False)]["Débit"].sum()
+                ca_n2  = ca_b2 - ret2 - rem2
+                base2  = max(ca_n2, 0)
+                taux2  = contrat["paliers"][0]["taux"] / 100
+                droits_bruts = base2 * taux2 * contrat["part"] / 100
+                resultats_sim.append({
+                    "Auteur": contrat["auteur"], "Titre": contrat["titre"],
+                    "Statut": contrat.get("statut_fiscal",""),
+                    "CA net (€)": round(ca_n2,2),
+                    "Base calcul (€)": round(base2,2),
+                    "Droits bruts (€)": round(droits_bruts,2),
+                })
+            df_sim_res = pd.DataFrame(resultats_sim)
+            cols_s2 = ["CA net (€)","Base calcul (€)","Droits bruts (€)"]
+            st.dataframe(df_sim_res.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_s2}), use_container_width=True)
+            total_bruts = df_sim_res["Droits bruts (€)"].sum()
+            st.metric("💰 Total droits bruts estimés", f"{fmt_fr(total_bruts,2)} €")
+            st.divider()
+            st.markdown("**Précompte URSSAF estimé**")
+            col_u1,col_u2,col_u3,col_u4 = st.columns(4)
+            taux_csg  = col_u1.number_input("CSG+CRDS (%)", value=9.70, step=0.01, key="da_csg")
+            taux_fp   = col_u2.number_input("Formation prof. (%)", value=1.00, step=0.01, key="da_fp")
+            taux_raap = col_u3.number_input("RAAP (%)", value=0.0, step=0.01, key="da_raap")
+            taux_diff = col_u4.number_input("Contribution diffuseur (%)", value=1.10, step=0.05, key="da_diff_taux")
+            est_ts = df_sim_res["Statut"].str.startswith("Traitements")
+            assiette = df_sim_res["Droits bruts (€)"] * 0.9825
+            precompte = np.where(est_ts, assiette*(taux_csg+taux_fp+taux_raap)/100, 0.0)
+            contrib   = df_sim_res["Droits bruts (€)"] * taux_diff / 100
+            total_urssaf_s = precompte.sum() + contrib.sum()
+            cu1,cu2,cu3 = st.columns(3)
+            cu1.metric("Précompte URSSAF (TS)", f"{fmt_fr(precompte.sum(),2)} €")
+            cu2.metric("Contribution diffuseur", f"{fmt_fr(contrib.sum(),2)} €")
+            cu3.metric("Total à reverser URSSAF", f"{fmt_fr(total_urssaf_s,2)} €")
 
-    if not isbns_d:
-        st.info("Aucune écriture trouvée sur ces comptes pour la période.")
-    else:
-        lignes = []
-        for isbn in isbns_d:
-            lignes.append({
-                "ISBN": isbn,
-                "Droits bruts (€)": round(float(db_s.get(isbn,0)),2),
-                "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
-                "Précompte URSSAF (€)": round(float(urs_s.get(isbn,0)),2),
-                "Net dû auteur (€)": round(float(net_s.get(isbn,0)),2),
-                "À-valoir restant (€)": round(float(av_s.get(isbn,0)),2),
-            })
-        df_d = pd.DataFrame(lignes)
-        cols_m = ["Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]
-        st.dataframe(df_d.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m}), use_container_width=True)
+    with ong3:
+        st.subheader("Montants réellement comptabilisés")
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        col1_d,col2_d = st.columns(2)
+        with col1_d:
+            date_debut_d = st.date_input("Période du", df["Date"].dropna().min().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_d")
+            compte_db  = st.text_input("Droits bruts (charge)", value="604300000", key="da_cpt_db")
+            compte_urs = st.text_input("URSSAF à payer", value="438106", key="da_cpt_urs")
+        with col2_d:
+            date_fin_d = st.date_input("Au", df["Date"].dropna().max().date() if not df["Date"].dropna().empty else _dt.date.today(), key="da_f")
+            compte_diff_d = st.text_input("Contribution diffuseur", value="645106", key="da_cpt_diff")
+            compte_net_d  = st.text_input("Droits à payer (net)", value="408106", key="da_cpt_net")
+            compte_av_d   = st.text_input("À-valoirs (bilan)", value="409600", key="da_cpt_av")
 
-        total_db = df_d["Droits bruts (€)"].sum()
-        total_urs = df_d["Précompte URSSAF (€)"].sum()
-        total_diff = df_d["Contribution diffuseur (€)"].sum()
-        total_net = df_d["Net dû auteur (€)"].sum()
+        mask_p = (df["Date"]>=pd.to_datetime(date_debut_d)) & (df["Date"]<=pd.to_datetime(date_fin_d))
+        df_p = df[mask_p]
 
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("Droits bruts", f"{fmt_fr(total_db,2)} €")
-        c2.metric("Précompte URSSAF", f"{fmt_fr(total_urs,2)} €")
-        c3.metric("Contribution diffuseur", f"{fmt_fr(total_diff,2)} €")
-        c4.metric("Net dû aux auteurs", f"{fmt_fr(total_net,2)} €")
+        def par_isbn_d(cpt, sens):
+            m = df_p["Compte"].astype(str).str.strip()==str(cpt).strip()
+            if not m.any(): return pd.Series(dtype=float)
+            g = df_p[m].groupby("Code_Analytique")
+            return (g["Débit"].sum()-g["Crédit"].sum()) if sens=="debit" else (g["Crédit"].sum()-g["Débit"].sum())
 
-        st.markdown(f"**Total à reverser URSSAF : {fmt_fr(total_urs+total_diff,2)} €**")
+        db_s   = par_isbn_d(compte_db,"debit")
+        urs_s  = par_isbn_d(compte_urs,"credit")
+        diff_s = par_isbn_d(compte_diff_d,"debit")
+        net_s  = par_isbn_d(compte_net_d,"credit")
+        av_s   = par_isbn_d(compte_av_d,"debit")
 
-        buf_d = BytesIO()
-        with pd.ExcelWriter(buf_d, engine="openpyxl") as writer:
-            df_d.to_excel(writer, index=False, sheet_name="Droits_auteurs")
-        buf_d.seek(0)
-        st.download_button("📥 Exporter (Excel)", buf_d,
-            file_name=f"Droits_auteurs_{date_debut_d}_{date_fin_d}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        isbns_d = sorted(set(db_s.index)|set(urs_s.index)|set(diff_s.index)|set(net_s.index))
+        isbns_d = [i for i in isbns_d if str(i).strip() not in ("","CHARGES INDIRECTES","PRODUITS INDIRECTS")]
+
+        if not isbns_d:
+            st.info("Aucune écriture trouvée sur ces comptes pour la période.")
+        else:
+            lignes_d = []
+            for isbn in isbns_d:
+                lignes_d.append({
+                    "ISBN": isbn,
+                    "Droits bruts (€)":         round(float(db_s.get(isbn,0)),2),
+                    "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
+                    "Précompte URSSAF (€)":      round(float(urs_s.get(isbn,0)),2),
+                    "Net dû auteur (€)":         round(float(net_s.get(isbn,0)),2),
+                    "À-valoir restant (€)":      round(float(av_s.get(isbn,0)),2),
+                })
+            df_d = pd.DataFrame(lignes_d)
+            cols_m = ["Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]
+            st.dataframe(df_d.style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m}), use_container_width=True)
+            total_db  = df_d["Droits bruts (€)"].sum()
+            total_urs = df_d["Précompte URSSAF (€)"].sum()
+            total_diff_t = df_d["Contribution diffuseur (€)"].sum()
+            total_net = df_d["Net dû auteur (€)"].sum()
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("Droits bruts", f"{fmt_fr(total_db,2)} €")
+            c2.metric("Précompte URSSAF", f"{fmt_fr(total_urs,2)} €")
+            c3.metric("Contribution diffuseur", f"{fmt_fr(total_diff_t,2)} €")
+            c4.metric("Net dû aux auteurs", f"{fmt_fr(total_net,2)} €")
+            st.markdown(f"**🏛️ Total à reverser à l'URSSAF : {fmt_fr(total_urs+total_diff_t,2)} €**")
+            st.session_state["df_royalties_reel"] = df_d
+            buf_d = BytesIO()
+            with pd.ExcelWriter(buf_d, engine="openpyxl") as writer:
+                df_d.to_excel(writer, index=False, sheet_name="Droits_auteurs")
+            buf_d.seek(0)
+            st.download_button("📥 Exporter (Excel)", buf_d,
+                file_name=f"Droits_auteurs_{date_debut_d}_{date_fin_d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="da_export")
+
+    with ong4:
+        st.subheader("Relevés de droits par auteur")
+        if "df_royalties_reel" not in st.session_state or st.session_state["df_royalties_reel"].empty:
+            st.warning("⚠️ Effectuez d'abord la lecture dans l'onglet 📒 Réel (comptabilisé).")
+        else:
+            df_rel = st.session_state["df_royalties_reel"].copy()
+            auteurs_list = ["Tous"]
+            ref_map = {c["isbn"]: c["auteur"] for c in st.session_state.get("royalties_referentiel",[])}
+            if ref_map:
+                df_rel["Auteur"] = df_rel["ISBN"].map(ref_map).fillna("(auteur non identifié)")
+                auteurs_list += sorted(df_rel["Auteur"].unique().tolist())
+            auteur_sel = st.selectbox("Sélectionner un auteur", auteurs_list, key="da_auteur_sel")
+            df_aff = df_rel if auteur_sel=="Tous" else df_rel[df_rel["Auteur"]==auteur_sel]
+            cols_rel = [c for c in df_aff.columns if c in ["Auteur","ISBN","Droits bruts (€)","Contribution diffuseur (€)","Précompte URSSAF (€)","Net dû auteur (€)","À-valoir restant (€)"]]
+            cols_m_rel = [c for c in cols_rel if "(€)" in c]
+            st.dataframe(df_aff[cols_rel].style.format({c:(lambda x: f"{fmt_fr(x,2)} €") for c in cols_m_rel}), use_container_width=True, hide_index=True)
+            buf_rel = BytesIO()
+            with pd.ExcelWriter(buf_rel, engine="openpyxl") as writer:
+                df_aff[cols_rel].to_excel(writer, index=False, sheet_name="Releve")
+            buf_rel.seek(0)
+            st.download_button(f"📥 Télécharger relevé — {auteur_sel}", buf_rel,
+                file_name=f"Royalties_{auteur_sel.replace(' ','_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="da_export_releve")
 
 # ── RETOURS & REMISES (EC) ──
 elif role == "ec" and page == "📦 Retours & Remises":
@@ -3224,7 +3483,7 @@ elif role == "ec" and page == "📋 Plan d'action":
               delta_color="inverse" if res_pa<0 else "normal")
     c2.metric("Marge brute globale",f"{fmt_fr(mb_pa)} €",f"{taux_mb_pa:.1f}%")
     c3.metric("Charges indirectes",f"{fmt_fr(ci_pa)} €",
-              f"{(ci_pa/ca_n_pa*100):.1f}% du CA net — {fmt_fr(ci_par_titre_pa):.0f} EUR/titre" if ca_n_pa else "")
+              f"{(ci_pa/ca_n_pa*100):.1f}% du CA net — {ci_par_titre_pa:.0f} EUR/titre" if ca_n_pa else "")
     c4.metric("ISBN actifs",f"{nb_isbn_pa}",f"{n_neg_pa} déficitaires / {n_pos_pa} bénéficiaires")
 
     col_top,col_flop = st.columns(2)
