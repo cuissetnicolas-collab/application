@@ -2414,10 +2414,10 @@ elif role == "ec" and page == "📄 Rapport de pilotage":
                 for i,(prio,rec,action,delai,fl) in enumerate([
                     ("1 — URGENT",f"Analyse des {n_neg_} titres déficitaires",
                      "Décision maintien ou arrêt commercial","Immédiat",_RC),
-                    ("2 — URGENT","Gel des réimpressions des titres déficitaires",
+                    ("2 - URGENT","Gel des réimpressions des titres déficitaires",
                      "Suspension commandes impression en attente d'analyse","Immédiat","FFFFFF"),
                     ("3 — IMPORTANT","Réexamen des charges indirectes de structure",
-                     "Audit des postes de charges — optimisation possible","T+3 mois",_YC),
+                     "Audit des postes de charges - optimisation possible","T+3 mois",_YC),
                     ("4 — IMPORTANT",f"Réimpression prioritaire des {nb_top} titres porteurs",
                      "Lancement procédure réimpression","T+2 mois","FFFFFF"),
                 ]):
@@ -3521,6 +3521,21 @@ elif role == "ec" and page == "📋 Plan d'action":
                 def _align(h="left",v="center",w=True): return _OPAlign(horizontal=h,vertical=v,wrap_text=w)
                 def _brd(c="CCCCCC"):
                     sd=_OPSide(style="thin",color=c); return _OPBorder(left=sd,right=sd,top=sd,bottom=sd)
+                def _auto_width(ws_):
+                    """Ajuste automatiquement la largeur de chaque colonne selon le contenu."""
+                    from openpyxl.utils import get_column_letter
+                    for col_cells in ws_.columns:
+                        max_len = 0
+                        col_letter = get_column_letter(col_cells[0].column)
+                        for cell in col_cells:
+                            if cell.value:
+                                # Prendre la ligne la plus longue si contenu multi-lignes
+                                lines = str(cell.value).split('\n')
+                                cell_max = max(len(l) for l in lines)
+                                max_len = max(max_len, cell_max)
+                        # Plafonner à 60 caractères, minimum 8
+                        adj = min(max(max_len + 2, 8), 60)
+                        ws_.column_dimensions[col_letter].width = adj
                 def _sc(ws_,row,col,value="",bg=None,bold=False,size=10,color="000000",
                         italic=False,h="left",v="center",wrap=True):
                     cell=ws_.cell(row=row,column=col,value=value)
@@ -3623,7 +3638,7 @@ elif role == "ec" and page == "📋 Plan d'action":
                      "Marge par titre","EC seul","J-5","Pré-rempli EC",
                      "Sélection présentée au dirigeant en début de réunion","FFFFFF"),
                     ("A3", "Préparation des 3 scénarios de simulation via le Simulateur de rentabilité\n"
-                            "D1 : Stabilisation — D2 : Réorientation catalogue — D3 : Optimisation charges",
+                            "D1 : Stabilisation, D2 : Réorientation catalogue, D3 : Optimisation charges",
                      "Tous indicateurs","EC seul","J-5","Pré-rempli EC",
                      "Simulations disponibles sur Python VISION ÉDITION pendant la réunion","D6E4F0"),
                 ]
@@ -3639,7 +3654,7 @@ elif role == "ec" and page == "📋 Plan d'action":
                 _blank(ws_pa,r_,10,h=10); r_+=1
 
                 # SECTION B
-                r_=_sec(ws_pa,r_,9,"B","ACTIONS À COURT TERME","Décisions à prendre conjointement en réunion — cellules jaunes à compléter pendant la séance")
+                r_=_sec(ws_pa,r_,9,"B","ACTIONS À COURT TERME","Décisions à prendre conjointement en réunion - cellules jaunes à compléter pendant la séance")
                 r_=_hdrs(ws_pa,r_,["N°","Action","Indicateur source","Resp.","Échéance","Statut","Décision / Observation à noter en réunion"])
                 _pa_b1 = (f"Arbitrage sur les {n_neg_pa} titres déficitaires\n"
                            f"Pour chaque titre : maintien, arrêt commercial — Priorité : {flop1}")
@@ -3699,7 +3714,7 @@ elif role == "ec" and page == "📋 Plan d'action":
                          "Focus amélioration rentabilité titre par titre")
                 _pd2 = ("Réorientation vers un catalogue resserré\n"
                          "Réduction des nouveautés, focus sur les titres porteurs")
-                _pd3 = f"Réduction des charges indirectes\nObjectif : CI < {ci_cible} EUR — résultat net cible > 0"
+                _pd3 = f"Réduction des charges indirectes\nObjectif : CI < {ci_cible} EUR - résultat net cible > 0"
                 for num,orient,scen,it,im,stat,dec,bg_ in [
                     ("D1",_pd1,"Scénario 1\nStabilisation","Neutre","+3 à 5 pts","Pré-rempli EC","Décision : Retenu / Écarté / À approfondir","D6E4F0"),
                     ("D2",_pd2,"Scénario 2\nRéorientation","Positif\n(+ tréso.)","+8 à 12 pts","Pré-rempli EC","Décision : Retenu / Écarté / À approfondir","F5E6DF"),
@@ -3718,9 +3733,9 @@ elif role == "ec" and page == "📋 Plan d'action":
                 # SECTION E
                 r_=_sec(ws_pa,r_,9,"E","SUIVI DES DÉCISIONS — Compte-rendu de réunion","À compléter en fin de réunion — constitue le compte-rendu officiel signé par les deux parties")
                 for rubrique,contenu,bg_,mod in [
-                    ("Constats principaux",f"Marge brute {fmt_fr(mb_pa)} EUR ({taux_mb_pa:.1f}%) — Résultat net {fmt_fr(res_pa)} EUR — {n_neg_pa} titres déficitaires sur {nb_isbn_pa}","D6E4F0",False),
+                    ("Constats principaux",f"Marge brute {fmt_fr(mb_pa)} EUR ({taux_mb_pa:.1f}%) - Résultat net {fmt_fr(res_pa)} EUR - {n_neg_pa} titres déficitaires sur {nb_isbn_pa}","D6E4F0",False),
                     ("Décisions actées","À compléter en réunion : _______________________________________________","FFF2CC",True),
-                    ("Scénario stratégique retenu","Scénario retenu (entourer) :  D1 — Stabilisation  /  D2 — Réorientation  /  D3 — Optimisation  /  Reporté","FFF2CC",True),
+                    ("Scénario stratégique retenu","Scénario retenu (entourer) :  D1 - Stabilisation  /  D2 - Réorientation  /  D3 - Optimisation  /  Reporté","FFF2CC",True),
                     ("Points en attente","À compléter en réunion : _______________________________________________","FFF2CC",True),
                     ("Prochain RDV",f"Date : {date_p_s}   Lieu : ___________________   Ordre du jour : ___________________","FFF2CC",True),
                 ]:
@@ -3732,7 +3747,7 @@ elif role == "ec" and page == "📋 Plan d'action":
                 _blank(ws_pa,r_,10,h=15); r_+=1
 
                 # Signatures
-                _mg(ws_pa,r_,2,r_,9,"SIGNATURES — Validation du plan d'action",bg="1F4E79",bold=True,size=10,color="FFFFFF",h="left")
+                _mg(ws_pa,r_,2,r_,9,"SIGNATURES - Validation du plan d'action",bg="1F4E79",bold=True,size=10,color="FFFFFF",h="left")
                 ws_pa.row_dimensions[r_].height=18; r_+=1
                 ws_pa.merge_cells(start_row=r_,start_column=2,end_row=r_+2,end_column=5)
                 _ce_val = ("L\'Expert-Comptable — CAB ÉDITION\n\n"
@@ -3749,6 +3764,7 @@ elif role == "ec" and page == "📋 Plan d'action":
                 for rr in range(r_,r_+3): ws_pa.row_dimensions[rr].height=22
                 r_+=3
 
+                _auto_width(ws_pa)
                 buf_pa=BytesIO(); wb_pa.save(buf_pa); buf_pa.seek(0)
                 fn_pa=f"Plan_Action_{NOM_PA[:20].replace(' ','_')}_{EXER_PA.replace('/','_')}.xlsx"
                 st.success("✅ Plan d'action généré avec les données réelles de VISION ÉDITION !")
