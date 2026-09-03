@@ -17,6 +17,9 @@ import qrcode
 from PIL import Image
 import anthropic
 import smtplib
+import openpyxl
+from openpyxl.styles import PatternFill as _OPFill, Font as _OPFont, Alignment as _OPAlign, Border as _OPBorder, Side as _OPSide
+from openpyxl.worksheet.datavalidation import DataValidation as _OPDV
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -479,6 +482,177 @@ def get_df_dirigeant():
         st.stop()
     return st.session_state["df_pivot"].copy(), st.session_state.get("param_comptes",{}), dos
 
+
+
+
+# ============================================================
+# FICHE TITRE — dialogue modal
+# ============================================================
+def _dialog_deco(title, width="large"):
+    if hasattr(st, "dialog"):
+        return st.dialog(title, width=width)
+    def _wrap(func):
+        def _inner(*args, **kwargs):
+            with st.expander(f"🪟 {title}", expanded=True):
+                return func(*args, **kwargs)
+        return _inner
+    return _wrap
+
+@_dialog_deco("📖 Fiche titre", width="large")
+def afficher_fiche_titre(isbn_sel, df, params):
+    df_t    = df[df["Code_Analytique"] == isbn_sel]
+    df_v_   = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params["ventes"]))]
+    df_vd_  = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params.get("ventes_distributeur") or params["ventes"]))]
+    df_r_   = df_t[mask_retours(df_t, params)]
+    df_rem_ = df_t[mask_remises(df_t, params)]
+    pstock  = tuple(params.get("stock") or ["603"])
+    df_c_   = df_t[df_t["Compte"].astype(str).str.startswith(tuple(params["charges"]))
+                   & (~df_t["Compte"].astype(str).str.startswith(pstock))]
+    df_stk_ = df_t[df_t["Compte"].astype(str).str.startswith(pstock)]
+    df_cfi_ = df_t[df_t["Compte"].astype(str) == COMPTE_CHARGES_INDIRECTES_REPARTIES]
+    pref_p  = tuple(params.get("provisions_reprises") or [])
+    df_pv_  = df_t[df_t["Compte"].astype(str).str.startswith(pref_p)] if pref_p else df_t.iloc[0:0]
+    net_pv  = df_pv_["Credit"].sum() - df_pv_["Debit"].sum() if False else df_pv_["Crédit"].sum() - df_pv_["Débit"].sum()
+
+    ventes_ht = df_v_["Crédit"].sum()
+    ventes_d  = df_vd_["Crédit"].sum()
+    retours_m = df_r_["Débit"].sum() - df_r_["Crédit"].sum()
+    remises_m = df_rem_["Débit"].sum() - df_rem_["Crédit"].sum()
+    ca_net_t  = ventes_ht - retours_m - remises_m
+    charges_v = (df_c_["Débit"].sum() - df_c_["Crédit"].sum()) - net_pv
+    var_stk   = df_stk_["Débit"].sum() - df_stk_["Crédit"].sum()
+    marge_b   = ca_net_t - charges_v
+    cf        = df_cfi_["Débit"].sum()
+    res_net   = marge_b - var_stk - cf
+    taux_ret  = (retours_m / ventes_d * 100) if ventes_d else 0
+    taux_rem  = (remises_m / ventes_d * 100) if ventes_d else 0
+
+    if res_net > 0 and taux_ret < 20:
+        signal, bg_s, fg_s = "🟢 Titre rentable", "#d1fae5", "#065f46"
+    elif res_net > 0 and taux_ret < 35:
+        signal, bg_s, fg_s = "🟡 Rentabilité à surveiller", "#fef3c7", "#92400e"
+    else:
+        signal, bg_s, fg_s = "🔴 Titre en difficulté", "#fee2e2", "#991b1b"
+
+    st.markdown(f"""<div style='padding:14px 18px;border-radius:12px;background:{bg_s};
+        color:{fg_s};font-weight:600;font-size:16px;margin-bottom:14px'>
+        {label_affiche(isbn_sel,df)} — {signal}</div>""", unsafe_allow_html=True)
+
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Taux de retour", f"{taux_ret:.1f} %")
+    k2.metric("Taux de remise", f"{taux_rem:.1f} %")
+    k3.metric("Marge brute", f"{fmt_fr(marge_b)} €")
+    k4.metric("Résultat net", f"{fmt_fr(res_net)} €")
+
+    if cf == 0 and not st.session_state.get("repartition_active"):
+        st.caption("ℹ️ Aucune charge fixe imputée : répartition des charges indirectes non activée.")
+    if abs(var_stk) > 0.5:
+        st.caption(f"ℹ️ Variation de stock : {fmt_fr(var_stk)} € — isolée de la marge brute, incluse dans le résultat net.")
+
+    st.markdown("#### Mini SIG — Soldes intermédiaires de gestion")
+    detail_charges = params.get("detail_charges")
+    mixte  = params.get("contenu_fabrication_mixte") or {}
+    mx_cpt = tuple(mixte.get("comptes") or [])
+    mx_kw  = [m.strip().upper() for m in (mixte.get("mots_cles_fabrication") or []) if m.strip()]
+
+    charge_rows = []
+    if detail_charges:
+        total_det = 0.0; cpts_det = []
+        for nom_nat, prefixes in detail_charges.items():
+            if prefixes and any(str(p).startswith(str(sp)) or str(sp).startswith(str(p))
+                                for p in prefixes for sp in list(pstock)):
+                continue
+            pref_eff = (list(prefixes) + list(params.get("provisions_reprises") or [])
+                        if nom_nat == "Provision pour retour" else list(prefixes))
+            df_nat_p = df_t[df_t["Compte"].astype(str).str.startswith(tuple(pref_eff))] if pref_eff else df_t.iloc[0:0]
+            df_nat_m = df_t.iloc[0:0]
+            if nom_nat in ("Contenu","Fabrication") and mx_cpt:
+                df_mx = df_t[df_t["Compte"].astype(str).str.startswith(mx_cpt)]
+                if not df_mx.empty and mx_kw:
+                    mask_fab = df_mx["Libellé"].astype(str).str.upper().str.contains("|".join(mx_kw),regex=True)
+                else:
+                    mask_fab = pd.Series(False,index=df_mx.index)
+                df_nat_m = df_mx[mask_fab] if nom_nat=="Fabrication" else df_mx[~mask_fab]
+                cpts_det.extend(list(mx_cpt))
+            df_nat = pd.concat([df_nat_p,df_nat_m]) if not df_nat_m.empty else df_nat_p
+            val    = df_nat["Débit"].sum() - df_nat["Crédit"].sum()
+            cpts_det.extend(pref_eff)
+            charge_rows.append((f"− {nom_nat}", -val, "deduction"))
+            total_det += val
+        reste = charges_v - total_det
+        if abs(reste) > 0.5:
+            charge_rows.append(("− Autres charges directes", -reste, "deduction"))
+    else:
+        charge_rows = [("− Charges variables", -charges_v, "deduction")]
+
+    rows_sig = (
+        [("Ventes HT", ventes_ht, "base"),
+         ("− Retours", -retours_m, "deduction"),
+         ("− Remises", -remises_m, "deduction"),
+         ("= CA net", ca_net_t, "subtotal")]
+        + charge_rows
+        + [("= Marge brute", marge_b, "subtotal")]
+        + ([("− Variation de stock", -var_stk, "deduction")] if abs(var_stk) > 0.5 else [])
+        + [("− Charges fixes imputées", -cf, "deduction"),
+           ("= Résultat net du titre", res_net, "total")]
+    )
+
+    html_rows = ""
+    for lib_s, mont_s, style_s in rows_sig:
+        if style_s == "subtotal":
+            rs = "background:#eef2ff;font-weight:600;"
+        elif style_s == "total":
+            c_ = "#065f46" if mont_s>=0 else "#991b1b"
+            f_ = "#d1fae5" if mont_s>=0 else "#fee2e2"
+            rs = f"background:{f_};font-weight:700;color:{c_};"
+        elif style_s == "deduction":
+            rs = "color:#b91c1c;"
+        else:
+            rs = "font-weight:500;"
+        html_rows += (f"<tr style='{rs}'>"
+                      f"<td style='padding:6px 12px;border-bottom:1px solid #eee'>{lib_s}</td>"
+                      f"<td style='padding:6px 12px;border-bottom:1px solid #eee;text-align:right'>"
+                      f"{fmt_fr(mont_s)} €</td></tr>")
+    st.markdown(f"<table style='width:100%;border-collapse:collapse;font-size:14px'>"
+                f"{html_rows}</table>", unsafe_allow_html=True)
+
+    _sm = {"base":"absolute","deduction":"relative","subtotal":"total","total":"total"}
+    fig_f = go.Figure(go.Waterfall(
+        orientation="v", measure=[_sm[r[2]] for r in rows_sig],
+        x=[r[0] for r in rows_sig], y=[r[1] for r in rows_sig],
+        text=[f"{fmt_fr(r[1])} €" for r in rows_sig], textposition="outside",
+        connector={"line":{"color":"gray","width":0.5}},
+        decreasing={"marker":{"color":"#EF4444"}},
+        increasing={"marker":{"color":"#10B981"}},
+        totals={"marker":{"color":"#3B82F6"}}
+    ))
+    fig_f.update_layout(height=300+len(rows_sig)*10, margin=dict(t=10),
+                        xaxis_tickangle=-30 if len(rows_sig)>6 else 0)
+    st.plotly_chart(fig_f, use_container_width=True)
+
+    df_ev = df_t.copy()
+    df_ev["Date"] = pd.to_datetime(df_ev["Date"], errors="coerce")
+    df_ev["Mois"] = df_ev["Date"].dt.to_period("M").astype(str)
+    ev_v = df_ev[df_ev["Compte"].astype(str).str.startswith(tuple(params["ventes"]))].groupby("Mois")["Crédit"].sum().reset_index()
+    ev_r = df_ev[mask_retours(df_ev,params)].groupby("Mois")["Débit"].sum().reset_index()
+    ev   = ev_v.merge(ev_r,on="Mois",how="left").fillna(0)
+    ev.columns = ["Mois","Ventes","Retours"]
+    if not ev.empty:
+        st.markdown("#### Évolution mensuelle")
+        fig_ev = px.line(ev,x="Mois",y=["Ventes","Retours"],markers=True,height=240)
+        fig_ev.update_layout(margin=dict(t=10),legend_title="")
+        st.plotly_chart(fig_ev,use_container_width=True)
+
+    buf_ft = BytesIO()
+    df_cr_ft = pd.DataFrame({"Poste":[r[0] for r in rows_sig],"Montant (EUR)":[r[1] for r in rows_sig]})
+    with pd.ExcelWriter(buf_ft,engine="openpyxl") as writer:
+        df_cr_ft.to_excel(writer,index=False,sheet_name="Compte_Resultat")
+        if not ev.empty: ev.to_excel(writer,index=False,sheet_name="Evolution_mensuelle")
+    buf_ft.seek(0)
+    st.download_button("📥 Exporter la fiche titre (Excel)", buf_ft,
+        file_name=f"Fiche_{isbn_sel.replace('/','-')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"exp_fiche_{isbn_sel}")
 
 
 # HELPER check_pivot (défini avant le bloc if/elif)
@@ -1069,6 +1243,96 @@ elif role == "ec" and page == "⚙️ Paramétrage analytique":
             mime="application/json")
         st.dataframe(pivot.head(15))
 
+    # ── Répartition des charges indirectes (hors bouton, toujours visible) ──
+    if "df_pivot_brut" in st.session_state:
+        st.divider()
+        st.subheader("📐 Répartition des charges et produits indirects")
+        st.markdown(
+            "Les charges de structure non imputées à un titre ont été codées comme **charges indirectes**. "
+            "Vous pouvez les répartir au **nombre de titres actifs** (plutôt qu'au CA) pour ne pas masquer "
+            "les titres non rentables derrière les titres porteurs."
+        )
+        pivot_brut = st.session_state["df_pivot_brut"]
+        label_ci   = st.session_state.get("labels_indirect",{}).get("charges","CHARGES INDIRECTES")
+        label_pi   = st.session_state.get("labels_indirect",{}).get("produits","PRODUITS INDIRECTS")
+        masque_ci  = pivot_brut["Code_Analytique"].astype(str).str.strip() == label_ci
+        masque_pi  = pivot_brut["Code_Analytique"].astype(str).str.strip() == label_pi
+        total_ci   = (pivot_brut[masque_ci]["Débit"] - pivot_brut[masque_ci]["Crédit"]).sum()
+        total_pi   = (pivot_brut[masque_pi]["Crédit"] - pivot_brut[masque_pi]["Débit"]).sum()
+        titres_act = sorted(filtrer_isbn_reels(pivot_brut)["Code_Analytique"].astype(str).unique().tolist())
+        nb_titres  = len(titres_act)
+
+        col_r1,col_r2,col_r3 = st.columns(3)
+        col_r1.metric("Charges indirectes détectées", f"{fmt_fr(total_ci,2)} €")
+        col_r2.metric("Produits indirects détectés",  f"{fmt_fr(total_pi,2)} €")
+        col_r3.metric("Nombre de titres actifs",       nb_titres)
+
+        repartir = st.radio(
+            "Souhaitez-vous répartir les charges et produits indirects sur les titres actifs ?",
+            ["Non, je garde une ligne 'indirecte' globale","Oui, répartir sur les titres actifs"],
+            index=0, key="repartir_radio"
+        )
+
+        if repartir.startswith("Oui"):
+            if nb_titres == 0:
+                st.error("❌ Aucun titre actif détecté — répartition impossible.")
+            else:
+                pivot_rep = pivot_brut[~masque_ci & ~masque_pi].copy()
+                nouvelles = []
+
+                total_ci_d = pivot_brut[masque_ci]["Débit"].sum()
+                total_ci_c = pivot_brut[masque_ci]["Crédit"].sum()
+                if total_ci_d != 0 or total_ci_c != 0:
+                    pcd = round(total_ci_d / nb_titres, 2)
+                    pcc = round(total_ci_c / nb_titres, 2)
+                    for isbn in titres_act:
+                        nouvelles.append({
+                            "Compte": COMPTE_CHARGES_INDIRECTES_REPARTIES,
+                            "Famille_Analytique": "EDITION",
+                            "Code_Analytique": isbn,
+                            "Date": pd.NaT,
+                            "Libellé": f"Quote-part charges indirectes ({nb_titres} titres actifs)",
+                            "Débit": pcd, "Crédit": pcc,
+                        })
+
+                total_pi_d = pivot_brut[masque_pi]["Débit"].sum()
+                total_pi_c = pivot_brut[masque_pi]["Crédit"].sum()
+                if total_pi_d != 0 or total_pi_c != 0:
+                    ppd = round(total_pi_d / nb_titres, 2)
+                    ppc = round(total_pi_c / nb_titres, 2)
+                    for isbn in titres_act:
+                        nouvelles.append({
+                            "Compte": COMPTE_PRODUITS_INDIRECTS_REPARTIS,
+                            "Famille_Analytique": "EDITION",
+                            "Code_Analytique": isbn,
+                            "Date": pd.NaT,
+                            "Libellé": f"Quote-part produits indirects ({nb_titres} titres actifs)",
+                            "Débit": ppd, "Crédit": ppc,
+                        })
+
+                if nouvelles:
+                    df_nouv = pd.DataFrame(nouvelles)
+                    for c in pivot_rep.columns:
+                        if c not in df_nouv.columns: df_nouv[c] = None
+                    pivot_rep = pd.concat([pivot_rep, df_nouv[pivot_rep.columns]], ignore_index=True)
+
+                st.session_state["df_pivot"] = pivot_rep
+                st.session_state["repartition_active"] = True
+                st.session_state["repartition_detail"] = {
+                    "nb_titres_actifs": nb_titres,
+                    "part_charge":  round(total_ci / nb_titres, 2) if nb_titres else 0,
+                    "part_produit": round(total_pi / nb_titres, 2) if nb_titres else 0,
+                }
+                st.success(
+                    f"✅ Répartition effectuée sur {nb_titres} titres actifs : "
+                    f"{fmt_fr(round(total_ci/nb_titres,2),2)} € de charges et "
+                    f"{fmt_fr(round(total_pi/nb_titres,2),2)} € de produits par titre."
+                )
+        else:
+            st.session_state["df_pivot"] = pivot_brut
+            st.session_state["repartition_active"] = False
+            st.info("Les charges et produits indirects restent sur une ligne globale. "
+                    "Vous pouvez modifier ce choix à tout moment sans régénérer le socle.")
 
 
 # ── TABLEAU DE BORD ──
@@ -1175,8 +1439,16 @@ elif role == "ec" and page == "📖 Analyse par titre":
     _liste_titres(col_f, "⚠️ Plus difficiles (résultat net)", indic.sort_values("Résultat net",ascending=True).head(5), "Résultat net")
 
     st.divider()
-    isbn_sel = st.selectbox("Sélectionner un titre pour la fiche détaillée",
-                            titres, format_func=lambda c: label_affiche(c,df))
+    st.divider()
+    st.markdown("**Ouvrir la fiche détaillée d'un titre**")
+    col_sel_pa, col_btn_pa = st.columns([4,1])
+    with col_sel_pa:
+        isbn_sel = st.selectbox("Titre (ISBN)", titres, label_visibility="collapsed",
+                                format_func=lambda c: label_affiche(c,df))
+    with col_btn_pa:
+        if st.button("📖 Ouvrir la fiche", type="primary", use_container_width=True,
+                     key="btn_ouvrir_fiche"):
+            afficher_fiche_titre(isbn_sel, df, params)
 
     # ── Calculs fiche titre ──
     df_t    = df[df["Code_Analytique"] == isbn_sel]
@@ -2900,6 +3172,334 @@ Top 5 titres par CA net :
         st.session_state["messages_agent"] = []
         st.rerun()
 
+
+
+
+# ── PLAN D'ACTION (EC) ──
+elif role == "ec" and page == "📋 Plan d'action":
+    df, params = check_pivot()
+    dos = get_dossier(st.session_state["dossier_id"])
+    st.header(f"📋 Plan d'action — {dos['nom']}")
+    st.markdown(f"*Exercice {dos.get('exercice','')} — Réunion trimestrielle de pilotage*")
+
+    # ── Calculs depuis le pivot ──
+    df_v_pa   = df[mask_ventes(df,params)]
+    df_r_pa   = df[mask_retours(df,params)]
+    df_rem_pa = df[mask_remises(df,params)]
+    df_c_pa   = df[mask_charges(df,params)]
+    df_prov_pa= df[mask_provisions_reprises(df,params)]
+    net_p_pa  = df_prov_pa["Crédit"].sum()-df_prov_pa["Débit"].sum()
+
+    ca_b_pa = df_v_pa["Crédit"].sum()-df_v_pa["Débit"].sum()
+    tr_pa   = df_r_pa["Débit"].sum()-df_r_pa["Crédit"].sum()
+    rem_pa  = df_rem_pa["Débit"].sum()-df_rem_pa["Crédit"].sum()
+    ca_n_pa = ca_b_pa-tr_pa-rem_pa
+    ch_pa   = (df_c_pa["Débit"].sum()-df_c_pa["Crédit"].sum())-net_p_pa
+
+    mask_ci_pa  = df["Code_Analytique"].astype(str).str.upper().isin(["CHARGES INDIRECTES","FRAIS GENERAUX"])
+    mask_cir_pa = df["Compte"].astype(str)==COMPTE_CHARGES_INDIRECTES_REPARTIES
+    ci_pa = df[mask_ci_pa|mask_cir_pa]["Débit"].sum()-df[mask_ci_pa|mask_cir_pa]["Crédit"].sum()
+    mb_pa = ca_n_pa-(ch_pa-ci_pa) if ci_pa>0 else ca_n_pa-ch_pa
+    res_pa= ca_n_pa-ch_pa
+    taux_mb_pa = (mb_pa/ca_n_pa*100) if ca_n_pa else 0
+
+    titres_pa = sorted(filtrer_isbn_reels(df)["Code_Analytique"].astype(str).unique().tolist())
+    nb_isbn_pa = len(titres_pa)
+    ci_par_titre_pa = ci_pa/nb_isbn_pa if nb_isbn_pa>0 else 0
+    indic_pa = calculer_indicateurs_titres(df,params,titres_pa) if titres_pa else pd.DataFrame()
+    top5_pa  = indic_pa.sort_values("Marge brute",ascending=False).head(5) if not indic_pa.empty else pd.DataFrame()
+    flop5_pa = indic_pa.sort_values("Marge brute",ascending=True).head(5)  if not indic_pa.empty else pd.DataFrame()
+    n_neg_pa = int((indic_pa["Marge brute"]<0).sum()) if not indic_pa.empty else 0
+    n_pos_pa = int((indic_pa["Marge brute"]>=0).sum()) if not indic_pa.empty else 0
+
+    mode_anon_pa = st.session_state.get("mode_anonyme",False)
+    mapping_pa   = obtenir_mapping_anonymisation(df) if mode_anon_pa and titres_pa else {}
+    def _t(code): return mapping_pa.get(code,code) if mode_anon_pa else code
+
+    # ── Affichage contexte ──
+    st.subheader("📊 Données issues de VISION ÉDITION")
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Résultat analytique net",f"{fmt_fr(res_pa)} €",
+              delta="⚠️ Déficitaire" if res_pa<0 else "✅ Bénéficiaire",
+              delta_color="inverse" if res_pa<0 else "normal")
+    c2.metric("Marge brute globale",f"{fmt_fr(mb_pa)} €",f"{taux_mb_pa:.1f}%")
+    c3.metric("Charges indirectes",f"{fmt_fr(ci_pa)} €",
+              f"{(ci_pa/ca_n_pa*100):.1f}% du CA net — {fmt_fr(ci_par_titre_pa):.0f} EUR/titre" if ca_n_pa else "")
+    c4.metric("ISBN actifs",f"{nb_isbn_pa}",f"{n_neg_pa} déficitaires / {n_pos_pa} bénéficiaires")
+
+    col_top,col_flop = st.columns(2)
+    with col_top:
+        st.markdown("**🏆 Top 5 porteurs**")
+        for i,(_,row) in enumerate(top5_pa.iterrows()):
+            st.write(f"{i+1}. **{_t(row['Code_Analytique'])}** — marge {fmt_fr(row['Marge brute'])} € "
+                     f"(retour {row['Taux retour (%)']: .1f}%)")
+    with col_flop:
+        st.markdown("**⚠️ Flop 5 déficitaires**")
+        for i,(_,row) in enumerate(flop5_pa.iterrows()):
+            st.write(f"{i+1}. **{_t(row['Code_Analytique'])}** — perte {fmt_fr(row['Marge brute'])} € "
+                     f"(retour {row['Taux retour (%)']: .1f}%)")
+
+    st.divider()
+    st.subheader("⚙️ Paramètres de la réunion")
+    col_p1,col_p2 = st.columns(2)
+    with col_p1:
+        date_reunion   = st.date_input("Date de la réunion",value=_dt.date.today(),key="pa_date_reunion")
+        date_prochaine = st.date_input("Prochaine réunion",key="pa_date_prochaine")
+    with col_p2:
+        mode_anon_exp = st.checkbox("Anonymiser les titres dans l'export",value=mode_anon_pa,key="pa_anon")
+        st.caption("Les titres seront présentés sous forme T1, T2... si coché.")
+
+    st.divider()
+    st.info("Le plan d'action sera généré avec les données réelles de VISION ÉDITION. "
+            "Les zones jaunes restent modifiables dans Excel pour saisir les décisions en réunion.")
+
+    if st.button("📋 Générer le plan d'action (Excel)", type="primary", use_container_width=True):
+        with st.spinner("Génération en cours..."):
+            try:
+                # Helpers Excel
+                def _fill(c): return _OPFill("solid",fgColor=c)
+                def _font(b=False,s=10,c="000000",i=False): return _OPFont(bold=b,size=s,color=c,italic=i,name="Arial")
+                def _align(h="left",v="center",w=True): return _OPAlign(horizontal=h,vertical=v,wrap_text=w)
+                def _brd(c="CCCCCC"):
+                    sd=_OPSide(style="thin",color=c); return _OPBorder(left=sd,right=sd,top=sd,bottom=sd)
+                def _sc(ws_,row,col,value="",bg=None,bold=False,size=10,color="000000",
+                        italic=False,h="left",v="center",wrap=True):
+                    cell=ws_.cell(row=row,column=col,value=value)
+                    if bg: cell.fill=_fill(bg)
+                    cell.font=_font(bold,size,color,italic)
+                    cell.alignment=_align(h,v,wrap); cell.border=_brd(); return cell
+                def _mg(ws_,r1,c1,r2,c2,value="",bg=None,bold=False,size=10,
+                        color="000000",italic=False,h="center",v="center"):
+                    ws_.merge_cells(start_row=r1,start_column=c1,end_row=r2,end_column=c2)
+                    cell=ws_.cell(row=r1,column=c1,value=value)
+                    if bg: cell.fill=_fill(bg)
+                    cell.font=_font(bold,size,color,italic)
+                    cell.alignment=_align(h,v,True); cell.border=_brd(); return cell
+                def _blank(ws_,r,nc,bg="FFFFFF",h=8):
+                    ws_.row_dimensions[r].height=h
+                    for c in range(1,nc+1): ws_.cell(row=r,column=c).fill=_fill(bg)
+                def _sec(ws_,r,nc,let,tit,sous=""):
+                    ws_.merge_cells(start_row=r,start_column=2,end_row=r,end_column=nc)
+                    cell=ws_.cell(row=r,column=2,value=f"{let}.  {tit.upper()}")
+                    cell.fill=_fill("1F4E79"); cell.font=_font(bold=True,s=12,c="FFFFFF")
+                    cell.alignment=_align("left","center",False); cell.border=_brd()
+                    ws_.row_dimensions[r].height=22; r+=1
+                    if sous:
+                        ws_.merge_cells(start_row=r,start_column=2,end_row=r,end_column=nc)
+                        c2_=ws_.cell(row=r,column=2,value=sous)
+                        c2_.fill=_fill("D6E4F0"); c2_.font=_font(s=9,c="444444",i=True)
+                        c2_.alignment=_align("left","center",False); c2_.border=_brd()
+                        ws_.row_dimensions[r].height=18; r+=1
+                    return r
+                def _hdrs(ws_,r,lst):
+                    for c,h in enumerate(lst,2):
+                        cell=ws_.cell(row=r,column=c,value=h)
+                        cell.fill=_fill("1F4E79"); cell.font=_font(bold=True,s=9,c="FFFFFF")
+                        cell.alignment=_align("center","center",True); cell.border=_brd("888888")
+                    ws_.row_dimensions[r].height=22; return r+1
+
+                NOM_PA=dos["nom"]; EXER_PA=dos.get("exercice","")
+                date_r_s=date_reunion.strftime("%d/%m/%Y")
+                date_p_s=date_prochaine.strftime("%d/%m/%Y") if date_prochaine else "___/___/______"
+                MARINE_PA="1F4E79"; TERRA_PA="C0522A"
+
+                wb_pa=openpyxl.Workbook()
+                ws_pa=wb_pa.active; ws_pa.title="Plan d'action"
+                ws_pa.sheet_view.showGridLines=False
+                for col,w in [("A",2),("B",6),("C",8),("D",26),("E",28),("F",14),("G",12),("H",14),("I",22),("J",3)]:
+                    ws_pa.column_dimensions[col].width=w
+                for r_ in range(1,130):
+                    ws_pa.row_dimensions[r_].height=16
+                    for c in range(1,11): ws_pa.cell(row=r_,column=c).fill=_fill("FFFFFF")
+
+                # Titre
+                _mg(ws_pa,2,2,3,9,"OUTIL 8 — PLAN D'ACTION STRUCTURÉ",bg=MARINE_PA,bold=True,size=15,color="FFFFFF")
+                ws_pa.row_dimensions[2].height=26; ws_pa.row_dimensions[3].height=26
+                _mg(ws_pa,4,2,4,9,
+                    f"CAB ÉDITION  /  {NOM_PA} — Exercice {EXER_PA}  |  "
+                    f"Réunion de pilotage : {date_r_s}  |  Prochaine réunion : {date_p_s}",
+                    bg=TERRA_PA,bold=False,size=10,color="FFFFFF",italic=True,h="left")
+                ws_pa.row_dimensions[4].height=18
+                _blank(ws_pa,5,10,h=6)
+
+                # KPIs
+                _mg(ws_pa,6,2,6,9,"CONTEXTE DE L'ANALYSE — DONNÉES PYTHON VISION ÉDITION",bg=MARINE_PA,bold=True,size=10,color="FFFFFF",h="left")
+                ws_pa.row_dimensions[6].height=18
+                kpis_=[
+                    ("Résultat analytique net",f"{'+ ' if res_pa>=0 else '− '}{fmt_fr(abs(res_pa))} EUR","après charges indirectes","FFDDD9" if res_pa<0 else "E2EFDA","C00000" if res_pa<0 else "217346"),
+                    ("Marge brute globale",f"+ {fmt_fr(mb_pa)} EUR",f"soit +{taux_mb_pa:.1f}% du CA net","E2EFDA","217346"),
+                    ("Charges indirectes",f"{fmt_fr(ci_pa)} EUR",f"{fmt_fr(ci_par_titre_pa):.0f} EUR/titre — {(ci_pa/ca_n_pa*100):.1f}% du CA net" if ca_n_pa else "","FFF2CC","A67C00"),
+                    ("ISBN actifs",f"{nb_isbn_pa} titres",f"{n_neg_pa} déficitaires / {n_pos_pa} bénéficiaires","D6E4F0","1F4E79"),
+                ]
+                for i,(lbl,val,cmt,bg_k,col_k) in enumerate(kpis_):
+                    cs=2+i*2
+                    ws_pa.merge_cells(start_row=7,start_column=cs,end_row=8,end_column=cs)
+                    ws_pa.merge_cells(start_row=7,start_column=cs+1,end_row=7,end_column=cs+1)
+                    cl=ws_pa.cell(row=7,column=cs,value=lbl); cl.fill=_fill(bg_k); cl.font=_font(bold=True,s=9,c=col_k); cl.alignment=_align("center","center",False); cl.border=_brd()
+                    cv=ws_pa.cell(row=7,column=cs+1,value=val); cv.fill=_fill(bg_k); cv.font=_font(bold=True,s=13,c=col_k); cv.alignment=_align("center","center",False); cv.border=_brd()
+                    cc=ws_pa.cell(row=8,column=cs+1,value=cmt); cc.fill=_fill(bg_k); cc.font=_font(s=8,c=col_k,i=True); cc.alignment=_align("center","center",False); cc.border=_brd()
+                ws_pa.row_dimensions[7].height=22; ws_pa.row_dimensions[8].height=16
+                _blank(ws_pa,9,10,h=8)
+
+                dv_pa=_OPDV(type="list",formula1='"Pré-rempli EC,▶ À arbitrer,✓ Acté conjointement,À faire,Reporté"',showDropDown=False,showErrorMessage=False)
+                ws_pa.add_data_validation(dv_pa)
+                r_=10
+
+                # Préparer top5/flop5 strings
+                top3_str=" | ".join([f"{_t(row['Code_Analytique'])} (+{fmt_fr(row['Marge brute'])} EUR)" for _,row in top5_pa.head(3).iterrows()]) if not top5_pa.empty else "Données non disponibles"
+                flop5_str=" | ".join([f"{_t(row['Code_Analytique'])} ({fmt_fr(row['Marge brute'])} EUR)" for _,row in flop5_pa.iterrows()]) if not flop5_pa.empty else "Données non disponibles"
+                flop1=_t(flop5_pa.iloc[0]["Code_Analytique"]) if not flop5_pa.empty else "Titre 1"
+                top1=_t(top5_pa.iloc[0]["Code_Analytique"]) if not top5_pa.empty else "Titre 1"
+
+                # SECTION A
+                r_=_sec(ws_pa,r_,9,"A","PRÉPARATION EN AMONT","Réalisée par l'EC seul avant la réunion — information au dirigeant, pas de décision requise")
+                r_=_hdrs(ws_pa,r_,["N°","Action préparée par l'EC","Indicateur source","Resp.","Échéance","Statut","Note EC / Information au dirigeant"])
+                _pa_actions_A = [
+                    ("A1", "Extraction et analyse du catalogue via Python VISION ÉDITION\n"
+                            f"Top 3 porteurs : {top3_str}",
+                     "Marge par titre","EC seul","Avant réunion","Pré-rempli EC",
+                     "Rapport de pilotage (Outil 7) généré et transmis J-5","D6E4F0"),
+                    ("A2", "Sélection des titres à analyser conjointement\n"
+                            f"Flop 5 : {flop5_str}",
+                     "Marge par titre","EC seul","J-5","Pré-rempli EC",
+                     "Sélection présentée au dirigeant en début de réunion","FFFFFF"),
+                    ("A3", "Préparation des 3 scénarios de simulation via le Simulateur de rentabilité\n"
+                            "D1 : Stabilisation — D2 : Réorientation catalogue — D3 : Optimisation charges",
+                     "Tous indicateurs","EC seul","J-5","Pré-rempli EC",
+                     "Simulations disponibles sur Python VISION ÉDITION pendant la réunion","D6E4F0"),
+                ]
+                for num,action,indic,resp,ech,statut,note,bg_ in _pa_actions_A:
+                    _sc(ws_pa,r_,2,num,bg="D6E4F0",bold=True,size=10,color="1F4E79",h="center")
+                    _sc(ws_pa,r_,3,action,bg=bg_,size=9,color="222222",wrap=True)
+                    _sc(ws_pa,r_,4,indic,bg=bg_,bold=True,size=9,color="1F4E79",italic=True)
+                    _sc(ws_pa,r_,5,resp,bg=bg_,size=9,color="555555",h="center")
+                    _sc(ws_pa,r_,6,ech,bg=bg_,bold=True,size=9,color="1F4E79",h="center")
+                    cst=ws_pa.cell(row=r_,column=7,value=statut); cst.fill=_fill("D6E4F0"); cst.font=_font(bold=True,s=9,c="1F4E79"); cst.alignment=_align("center","center",False); cst.border=_brd(); dv_pa.add(cst)
+                    _sc(ws_pa,r_,8,note,bg=bg_,size=9,color="444444",italic=True,wrap=True)
+                    ws_pa.row_dimensions[r_].height=48; r_+=1
+                _blank(ws_pa,r_,10,h=10); r_+=1
+
+                # SECTION B
+                r_=_sec(ws_pa,r_,9,"B","ACTIONS À COURT TERME","Décisions à prendre conjointement en réunion — cellules jaunes à compléter pendant la séance")
+                r_=_hdrs(ws_pa,r_,["N°","Action","Indicateur source","Resp.","Échéance","Statut","Décision / Observation à noter en réunion"])
+                _pa_b1 = (f"Arbitrage sur les {n_neg_pa} titres déficitaires\n"
+                           f"Pour chaque titre : maintien, arrêt commercial — Priorité : {flop1}")
+                _pa_b2 = ("Gel des réimpressions pour les titres déficitaires\n"
+                           "Aucune nouvelle commande tant que la décision n\'est pas levée")
+                _pa_b3 = (f"Validation du plan de réimpression des titres porteurs\n"
+                           f"Priorité : {top1} — vérification stocks disponibles")
+                _pa_b4 = (f"Audit des charges indirectes : {fmt_fr(ci_pa)} EUR "
+                           f"({(ci_pa/ca_n_pa*100):.1f}% CA net)\nIdentifier les postes compressibles")
+                for num,action,indic,resp,ech,statut,note,bg_ in [
+                    ("B1",_pa_b1,"Marge par titre","EC + Dir.","Immédiat","▶ À arbitrer","Décision : ___________________________________","FCE4D6"),
+                    ("B2",_pa_b2,"Marge par titre","Dirigeant","Immédiat","▶ À arbitrer","Titres concernés : ___________________________","FFF5EE"),
+                    ("B3",_pa_b3,"Marge par titre","Dirigeant","T+1 mois","▶ À arbitrer","Quantités retenues : ________________________","FCE4D6"),
+                    ("B4",_pa_b4,"Charges indirectes","EC","T+2 mois","▶ À arbitrer","Périmètre de l\'audit : ______________________","FFF5EE"),
+                ]:
+                    _sc(ws_pa,r_,2,num,bg="C0522A",bold=True,size=10,color="FFFFFF",h="center")
+                    _sc(ws_pa,r_,3,action,bg=bg_,size=9,color="222222",wrap=True)
+                    _sc(ws_pa,r_,4,indic,bg=bg_,bold=True,size=9,color="1F4E79",italic=True)
+                    _sc(ws_pa,r_,5,resp,bg=bg_,size=9,color="555555",h="center")
+                    _sc(ws_pa,r_,6,ech,bg=bg_,bold=True,size=9,color="C00000",h="center")
+                    cst=ws_pa.cell(row=r_,column=7,value=statut); cst.fill=_fill("FCE4D6"); cst.font=_font(bold=True,s=9,c="A67C00"); cst.alignment=_align("center","center",False); cst.border=_brd("C0522A"); dv_pa.add(cst)
+                    cn=ws_pa.cell(row=r_,column=8,value=note); cn.fill=_fill("FFF2CC"); cn.font=_font(s=9,c="333333"); cn.alignment=_align("left","center",True); cn.border=_brd("C0522A")
+                    ws_pa.row_dimensions[r_].height=48; r_+=1
+                _blank(ws_pa,r_,10,h=10); r_+=1
+
+                # SECTION C
+                r_=_sec(ws_pa,r_,9,"C","ACTIONS À MOYEN TERME","Actions à valider en réunion — cellules jaunes à compléter")
+                r_=_hdrs(ws_pa,r_,["N°","Action","Indicateur source","Resp.","Échéance","Statut","Décision / Observation à noter en réunion"])
+                ci_cible=fmt_fr(ci_pa*0.7)
+                _pa_c1 = ("Révision des contrats d\'auteurs déficitaires\n"
+                           "Renégociation taux droits si à-valoir non amorti après 12 mois")
+                _pa_c2 = ("Optimisation du catalogue actif\n"
+                           "Archivage titres sans ventes depuis 24 mois — réduction du catalogue")
+                _pa_c3 = ("Préparation du dossier de subvention CNL et Région\n"
+                           "Anticiper la constitution du dossier")
+                _pa_c4 = f"Réduction des charges indirectes\nObjectif : CI < {ci_cible} EUR"
+                for num,action,indic,resp,ech,statut,note,bg_ in [
+                    ("C1",_pa_c1,"Droits d\'auteurs","Dirigeant","T+3 mois","▶ À arbitrer","Titres concernés : ___________________________","F5E6DF"),
+                    ("C2",_pa_c2,"Marge par titre","EC + Dir.","T+3 mois","▶ À arbitrer","Scénario retenu : D1 / D2 / D3 (entourer)","FFFFFF"),
+                    ("C3",_pa_c3,"Trésorerie prév.","Dirigeant","T+6 mois","À faire","Montant cible subvention : __________________","F5E6DF"),
+                    ("C4",_pa_c4,"Charges indirectes","EC + Dir.","T+6 mois","▶ À arbitrer","Postes retenus pour réduction : _____________","FFFFFF"),
+                ]:
+                    _sc(ws_pa,r_,2,num,bg="C0522A",bold=True,size=10,color="FFFFFF",h="center")
+                    _sc(ws_pa,r_,3,action,bg=bg_,size=9,color="222222",wrap=True)
+                    _sc(ws_pa,r_,4,indic,bg=bg_,bold=True,size=9,color="1F4E79",italic=True)
+                    _sc(ws_pa,r_,5,resp,bg=bg_,size=9,color="555555",h="center")
+                    _sc(ws_pa,r_,6,ech,bg=bg_,bold=True,size=9,color="A67C00",h="center")
+                    cst=ws_pa.cell(row=r_,column=7,value=statut); cst.fill=_fill("FCE4D6" if "arbitrer" in statut else "FFF2CC"); cst.font=_font(bold=True,s=9,c="A67C00"); cst.alignment=_align("center","center",False); cst.border=_brd(); dv_pa.add(cst)
+                    cn=ws_pa.cell(row=r_,column=8,value=note); cn.fill=_fill("FFF2CC"); cn.font=_font(s=9,c="333333"); cn.alignment=_align("left","center",True); cn.border=_brd("C0522A")
+                    ws_pa.row_dimensions[r_].height=48; r_+=1
+                _blank(ws_pa,r_,10,h=10); r_+=1
+
+                # SECTION D
+                r_=_sec(ws_pa,r_,9,"D","ORIENTATIONS STRATÉGIQUES — Horizon 12 mois","Scénarios préparés par l'EC — arbitrage du dirigeant requis en séance")
+                r_=_hdrs(ws_pa,r_,["N°","Orientation stratégique","Scénario","Impact tréso.","Impact marge","Statut","Décision dirigeant à noter en réunion"])
+                _pd1 = ("Maintien de la stratégie éditoriale actuelle\n"
+                         "Focus amélioration rentabilité titre par titre")
+                _pd2 = ("Réorientation vers un catalogue resserré\n"
+                         "Réduction des nouveautés, focus sur les titres porteurs")
+                _pd3 = f"Réduction des charges indirectes\nObjectif : CI < {ci_cible} EUR — résultat net cible > 0"
+                for num,orient,scen,it,im,stat,dec,bg_ in [
+                    ("D1",_pd1,"Scénario 1\nStabilisation","Neutre","+3 à 5 pts","Pré-rempli EC","Décision : Retenu / Écarté / À approfondir","D6E4F0"),
+                    ("D2",_pd2,"Scénario 2\nRéorientation","Positif\n(+ tréso.)","+8 à 12 pts","Pré-rempli EC","Décision : Retenu / Écarté / À approfondir","F5E6DF"),
+                    ("D3",_pd3,"Scénario 3\nOptimisation","Positif","+5 à 8 pts","Pré-rempli EC","Décision : Retenu / Écarté / À approfondir","D6E4F0"),
+                ]:
+                    _sc(ws_pa,r_,2,num,bg="1F4E79",bold=True,size=10,color="FFFFFF",h="center")
+                    _sc(ws_pa,r_,3,orient,bg=bg_,size=9,color="222222",wrap=True)
+                    _sc(ws_pa,r_,4,scen,bg=bg_,bold=True,size=9,color="1F4E79",h="center",wrap=True)
+                    _sc(ws_pa,r_,5,it,bg="E2EFDA",bold=True,size=9,color="217346",h="center",wrap=True)
+                    _sc(ws_pa,r_,6,im,bg="E2EFDA",bold=True,size=9,color="217346",h="center")
+                    cst=ws_pa.cell(row=r_,column=7,value=stat); cst.fill=_fill("D6E4F0"); cst.font=_font(bold=True,s=9,c="1F4E79"); cst.alignment=_align("center","center",False); cst.border=_brd(); dv_pa.add(cst)
+                    cn=ws_pa.cell(row=r_,column=8,value=dec); cn.fill=_fill("FFF2CC"); cn.font=_font(s=9,c="333333"); cn.alignment=_align("left","center",True); cn.border=_brd("C0522A")
+                    ws_pa.row_dimensions[r_].height=48; r_+=1
+                _blank(ws_pa,r_,10,h=10); r_+=1
+
+                # SECTION E
+                r_=_sec(ws_pa,r_,9,"E","SUIVI DES DÉCISIONS — Compte-rendu de réunion","À compléter en fin de réunion — constitue le compte-rendu officiel signé par les deux parties")
+                for rubrique,contenu,bg_,mod in [
+                    ("Constats principaux",f"Marge brute {fmt_fr(mb_pa)} EUR ({taux_mb_pa:.1f}%) — Résultat net {fmt_fr(res_pa)} EUR — {n_neg_pa} titres déficitaires sur {nb_isbn_pa}","D6E4F0",False),
+                    ("Décisions actées","À compléter en réunion : _______________________________________________","FFF2CC",True),
+                    ("Scénario stratégique retenu","Scénario retenu (entourer) :  D1 — Stabilisation  /  D2 — Réorientation  /  D3 — Optimisation  /  Reporté","FFF2CC",True),
+                    ("Points en attente","À compléter en réunion : _______________________________________________","FFF2CC",True),
+                    ("Prochain RDV",f"Date : {date_p_s}   Lieu : ___________________   Ordre du jour : ___________________","FFF2CC",True),
+                ]:
+                    ws_pa.merge_cells(start_row=r_,start_column=2,end_row=r_,end_column=3)
+                    cr_=ws_pa.cell(row=r_,column=2,value=rubrique); cr_.fill=_fill("1F4E79" if not mod else "555555"); cr_.font=_font(bold=True,s=9,c="FFFFFF"); cr_.alignment=_align("left","center",False); cr_.border=_brd()
+                    ws_pa.merge_cells(start_row=r_,start_column=4,end_row=r_,end_column=9)
+                    cc_=ws_pa.cell(row=r_,column=4,value=contenu); cc_.fill=_fill(bg_); cc_.font=_font(s=9,c="222222",i=not mod); cc_.alignment=_align("left","center",True); cc_.border=_brd("C0522A" if mod else "CCCCCC")
+                    ws_pa.row_dimensions[r_].height=28; r_+=1
+                _blank(ws_pa,r_,10,h=15); r_+=1
+
+                # Signatures
+                _mg(ws_pa,r_,2,r_,9,"SIGNATURES — Validation du plan d'action",bg="1F4E79",bold=True,size=10,color="FFFFFF",h="left")
+                ws_pa.row_dimensions[r_].height=18; r_+=1
+                ws_pa.merge_cells(start_row=r_,start_column=2,end_row=r_+2,end_column=5)
+                _ce_val = ("L\'Expert-Comptable — CAB ÉDITION\n\n"
+                            "Signature : ____________________________\n\n"
+                            f"Date : {date_r_s}")
+                _cd_val = (f"Le Dirigeant — {NOM_PA}\n\n"
+                            "Signature : ____________________________\n\n"
+                            "Date : _________________________________")
+                ce_=ws_pa.cell(row=r_,column=2,value=_ce_val)
+                ce_.fill=_fill("D6E4F0"); ce_.font=_font(s=10,c="1F4E79"); ce_.alignment=_align("left","top",True); ce_.border=_brd()
+                ws_pa.merge_cells(start_row=r_,start_column=6,end_row=r_+2,end_column=9)
+                cd_=ws_pa.cell(row=r_,column=6,value=_cd_val)
+                cd_.fill=_fill("F5E6DF"); cd_.font=_font(s=10,c="1F4E79"); cd_.alignment=_align("left","top",True); cd_.border=_brd()
+                for rr in range(r_,r_+3): ws_pa.row_dimensions[rr].height=22
+                r_+=3
+
+                buf_pa=BytesIO(); wb_pa.save(buf_pa); buf_pa.seek(0)
+                fn_pa=f"Plan_Action_{NOM_PA[:20].replace(' ','_')}_{EXER_PA.replace('/','_')}.xlsx"
+                st.success("✅ Plan d'action généré avec les données réelles de VISION ÉDITION !")
+                st.download_button("⬇️ Télécharger le plan d'action (Excel)",
+                    data=buf_pa,file_name=fn_pa,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,type="primary")
+            except Exception as e:
+                st.error(f"❌ Erreur : {e}")
+                st.exception(e)
 
 
 # ============================================================
