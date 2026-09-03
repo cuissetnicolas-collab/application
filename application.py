@@ -3517,7 +3517,7 @@ elif role == "ec" and page == "📋 Plan d'action":
             try:
                 # Helpers Excel
                 def _fill(c): return _OPFill("solid",fgColor=c)
-                def _font(b=False,s=10,c="000000",i=False): return _OPFont(bold=b,size=s,color=c,italic=i,name="Arial")
+                def _font(b=False,s=10,c="000000",i=False,bold=None): return _OPFont(bold=bold if bold is not None else b,size=s,color=c,italic=i,name="Arial")
                 def _align(h="left",v="center",w=True): return _OPAlign(horizontal=h,vertical=v,wrap_text=w)
                 def _brd(c="CCCCCC"):
                     sd=_OPSide(style="thin",color=c); return _OPBorder(left=sd,right=sd,top=sd,bottom=sd)
