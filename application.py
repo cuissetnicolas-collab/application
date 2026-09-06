@@ -1,7 +1,7 @@
 # ============================================================
 # VISION EDITION — streamlit_app.py
 # Version 2.0 — Multi-dossiers / Accès dirigeant / Rôles
-# © 2025 Nicolas CUISSET — Mémoire d'expertise comptable
+# © 2026 Nicolas CUISSET — Mémoire d'expertise comptable
 # ============================================================
 
 import streamlit as st
@@ -76,9 +76,9 @@ def init_cabinet():
     if "cabinet" not in st.session_state:
         st.session_state["cabinet"] = {
             "ec_users": {
-                "aurore": {
+                "Nicolas": {
                     "pw_hash": _hash("12345"),
-                    "name": "Aurore Demoulin",
+                    "name": "Nicolas Cuisset",
                     "role": "ec"
                 }
             },
@@ -1852,7 +1852,8 @@ elif role == "ec" and page == "✍️ Droits d'auteurs":
                 taux2  = contrat["paliers"][0]["taux"] / 100
                 droits_bruts = base2 * taux2 * contrat["part"] / 100
                 resultats_sim.append({
-                    "Auteur": contrat["auteur"], "Titre": contrat["titre"],
+                    "Auteur": contrat["auteur"],
+                    "Titre": label_affiche(contrat["isbn"], df_sim2) if st.session_state.get("mode_anonyme") else contrat["titre"],
                     "Statut": contrat.get("statut_fiscal",""),
                     "CA net (€)": round(ca_n2,2),
                     "Base calcul (€)": round(base2,2),
@@ -1918,7 +1919,7 @@ elif role == "ec" and page == "✍️ Droits d'auteurs":
             lignes_d = []
             for isbn in isbns_d:
                 lignes_d.append({
-                    "ISBN": isbn,
+                    "ISBN": label_affiche(isbn, df),
                     "Droits bruts (€)":         round(float(db_s.get(isbn,0)),2),
                     "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
                     "Précompte URSSAF (€)":      round(float(urs_s.get(isbn,0)),2),
@@ -2013,6 +2014,8 @@ elif role == "ec" and page == "📦 Retours & Remises":
         df_ri = filtrer_isbn_reels(df_r_)
         if not df_ri.empty:
             ret_isbn = df_ri.groupby("Code_Analytique")["Débit"].sum().abs().reset_index().sort_values("Débit",ascending=False)
+            ret_isbn["ISBN"] = ret_isbn["Code_Analytique"].apply(lambda c: label_affiche(c, df))
+            ret_isbn = ret_isbn[["ISBN","Débit"]].rename(columns={"Débit":"Retours (€)"})
             st.subheader("Retours par titre")
             st.dataframe(ret_isbn, hide_index=True)
 
@@ -2672,7 +2675,8 @@ elif role == "ec" and page == "✍️ Droits d'auteurs":
                 taux2  = contrat["paliers"][0]["taux"] / 100
                 droits_bruts = base2 * taux2 * contrat["part"] / 100
                 resultats_sim.append({
-                    "Auteur": contrat["auteur"], "Titre": contrat["titre"],
+                    "Auteur": contrat["auteur"],
+                    "Titre": label_affiche(contrat["isbn"], df_sim2) if st.session_state.get("mode_anonyme") else contrat["titre"],
                     "Statut": contrat.get("statut_fiscal",""),
                     "CA net (€)": round(ca_n2,2),
                     "Base calcul (€)": round(base2,2),
@@ -2738,7 +2742,7 @@ elif role == "ec" and page == "✍️ Droits d'auteurs":
             lignes_d = []
             for isbn in isbns_d:
                 lignes_d.append({
-                    "ISBN": isbn,
+                    "ISBN": label_affiche(isbn, df),
                     "Droits bruts (€)":         round(float(db_s.get(isbn,0)),2),
                     "Contribution diffuseur (€)": round(float(diff_s.get(isbn,0)),2),
                     "Précompte URSSAF (€)":      round(float(urs_s.get(isbn,0)),2),
@@ -2833,6 +2837,8 @@ elif role == "ec" and page == "📦 Retours & Remises":
         df_ri = filtrer_isbn_reels(df_r_)
         if not df_ri.empty:
             ret_isbn = df_ri.groupby("Code_Analytique")["Débit"].sum().abs().reset_index().sort_values("Débit",ascending=False)
+            ret_isbn["ISBN"] = ret_isbn["Code_Analytique"].apply(lambda c: label_affiche(c, df))
+            ret_isbn = ret_isbn[["ISBN","Débit"]].rename(columns={"Débit":"Retours (€)"})
             st.subheader("Retours par titre")
             st.dataframe(ret_isbn, hide_index=True)
 
