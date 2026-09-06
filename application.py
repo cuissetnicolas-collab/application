@@ -23,6 +23,12 @@ from openpyxl.worksheet.datavalidation import DataValidation as _OPDV
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+# ============================================================
+# IDENTITÉ DU CABINET — modifier ici pour personnaliser
+# ============================================================
+NOM_CABINET = "CAB ÉDITION"
+SLOGAN_CABINET = "Expert-comptable · Maisons d'édition indépendantes"
+
 try:
     from docx import Document
     from docx.shared import Pt, Cm, RGBColor
@@ -183,12 +189,6 @@ def save_dossier(dossier_id, data):
 # ============================================================
 # CONFIG PAGE
 # ============================================================
-# ============================================================
-# IDENTITÉ DU CABINET — modifier ici pour personnaliser
-# ============================================================
-NOM_CABINET = "CAB ÉDITION"
-SLOGAN_CABINET = "Expert-comptable · Maisons d'édition indépendantes"
-
 st.set_page_config(
     page_title=f"VISION EDITION — {NOM_CABINET}",
     page_icon="📚",
