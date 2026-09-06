@@ -35,6 +35,15 @@ def fmt_fr(x, decimals=0):
 
 
 # =====================
+APP_URL = "https://outilaccompagnementmaisonsedition-lyvgltfbwtqo4m9tdmzofu.streamlit.app/"
+
+# ============================================================
+# IDENTITÉ DU CABINET — modifier ici pour personnaliser
+# ============================================================
+NOM_CABINET = "CAB ÉDITION"
+SLOGAN_CABINET = "Expert-comptable · Maisons d'édition indépendantes"
+
+# =====================
 # CONFIGURATION PAGE
 # =====================
 st.set_page_config(
@@ -42,14 +51,6 @@ st.set_page_config(
     page_icon="📚",
     layout="wide"
 )
-
-APP_URL = "https://outilaccompagnementmaisonsedition-lyvgltfbwtqo4m9tdmzofu.streamlit.app/"
-
-# ============================================================
-# IDENTITÉ DU CABINET
-# ============================================================
-NOM_CABINET = "CAB ÉDITION"
-SLOGAN_CABINET = "Expert-comptable · Maisons d'édition indépendantes"
 
 
 # =====================
